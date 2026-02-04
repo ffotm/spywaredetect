@@ -1,437 +1,315 @@
 'use client'
 import React, { useState, useEffect } from 'react';
-import { Shield, AlertTriangle, Activity, Search, Trash2, Settings, FileWarning, Clock, TrendingUp, Zap, ChevronRight, Database, Cpu, HardDrive } from 'lucide-react';
-
-
-
-
+import { Shield, AlertTriangle, Activity, Search, Clock, Zap, Database } from 'lucide-react';
+import { pid } from 'process';
 
 export default function AntispywareDashboard() {
-    const [activeScans, setActiveScans] = useState(0);
     const [threats, setThreats] = useState([]);
-    const [scanProgress, setScanProgress] = useState(0);
+    const [safeCount, setSafeCount] = useState(0);
+    const [totalProcesses, setTotalProcesses] = useState(0);
     const [isScanning, setIsScanning] = useState(false);
-    const [processlist, setProcesslist] = useState(0);
-    const [safe, setSafe] = useState([]);
-    const [isActiveScans, setIsActiveScans] = useState(false);
     const [lastScanTime, setLastScanTime] = useState("Never");
+    const [scanProgress, setScanProgress] = useState(0);
+    const [error, setError] = useState(null);
+    const [safe, setSafe] = useState(0);
+    const [runningProcesses, setRunningProcesses] = useState([]);
 
-    useEffect(() => {
-        if (isScanning) {
-            const interval = setInterval(() => {
-                setScanProgress(prev => {
-                    if (prev >= 100) {
-                        setIsScanning(false);
-                        return 0;
-                    }
-                    return prev + 2;
-                });
-            }, 100);
-            return () => clearInterval(interval);
-        }
-    }, [isScanning]);
+    const fetchScan = async () => {
+        try {
+            setError(null);
+            const response = await fetch('http://localhost:8000/scan');
 
-    useEffect(() => {
-        if (isScanning || isActiveScans) {
-            // Simulate fetching detected threats
-            const fetchScan = async () => {
-                try {
-                    const response = await fetch('http://localhost:8000/scan');
-                    const data = await response.json();
-                    setThreats(data.alerts);
-                    setProcesslist(data.total_processes);
-                    setSafe(data.safe);
-
-
-                } catch (err) {
-                    console.error(err);
-                }
-
+            if (!response.ok) {
+                throw new Error(`Server error: ${response.status}`);
             }
-            fetchScan();
-            if (isActiveScans) {
-                const date = new Date();
-                setLastScanTime(date.toLocaleString());
-                const interval = setInterval(fetchScan, 5000);
-                return () => clearInterval(interval);
-            }
+
+            const data = await response.json();
+            console.log("Scan data received:", data);
+
+            setThreats(data.alerts || []);
+            setTotalProcesses(data.total_processes || 0);
+            setSafeCount(data.safe?.length || 0);
+            setRunningProcesses(data.processes || []);
+
+            const date = new Date();
+            setLastScanTime(date.toLocaleTimeString());
+
+        } catch (err) {
+            console.error("Scan error:", err);
+            setError(err.message);
         }
-    }, [isScanning, isActiveScans]);
+    };
 
     const startScan = async () => {
         setIsScanning(true);
         setScanProgress(0);
-        try {
-            const res = await fetch('http://localhost:8000/scan');
-            const data = await res.json();
-            setThreats(data.alerts);
-            setProcesslist(data.total_processes);
-            setSafe(data.safe);
-            console.log(data);
-            const date = new Date();
-            setLastScanTime(date.toLocaleString());
-            const interval = setInterval(startScan, 5000);
-            return () => clearInterval(interval);
+        streamScan();
 
-        } catch (err) { console.log(err) }
+        // Simulate progress bar
+        const progressInterval = setInterval(() => {
+            setScanProgress(prev => {
+                if (prev >= 90) {
+                    clearInterval(progressInterval);
+                    return 90;
+                }
+                return prev + 10;
+            });
+        }, 200);
 
+        await fetchScan();
 
+        clearInterval(progressInterval);
+        setScanProgress(100);
+
+        setTimeout(() => {
+            setIsScanning(false);
+            setScanProgress(0);
+        }, 500);
     };
+
+    // Auto-refresh every 10 seconds when active
+    useEffect(() => {
+        if (isScanning) return;
+
+        const interval = setInterval(fetchScan, 10000);
+        return () => clearInterval(interval);
+    }, [isScanning]);
+
+
+    const streamScan = async () => {
+        try {
+            setError(null);
+            const source = new EventSource('http://localhost:8000/scan/stream');
+            source.onmessage = (e) => {
+                const data = JSON.parse(e.data);
+                console.log("Streaming scan data:", data);
+                if (data.status === 'streaming') {
+                    setRunningProcesses(prev => [
+                        ...prev,
+                        {
+                            pid: data.data.PID,
+                            name: data.data.Name,
+                            path: data.data.Path,
+                            memory: data.data.Memory
+                        }
+                    ]);
+                    setTotalProcesses(prev => prev + 1);
+                }
+                else { source.close(); }
+
+            };
+            source.onerror = (e) => {
+                source.close();
+            }
+        } catch (err) {
+            console.error("Streaming scan error:", err);
+        }
+    }
+
+
 
     const getSeverityColor = (severity) => {
         switch (severity) {
-            case 'critical': return 'bg-red-500/10 text-red-400 border-red-500/30';
-            case 'high': return 'bg-orange-500/10 text-orange-400 border-orange-500/30';
-            case 'medium': return 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30';
-            default: return 'bg-blue-500/10 text-blue-400 border-blue-500/30';
+            case 'critical': return 'bg-red-900/30 text-red-400 border-red-500/50';
+            case 'high': return 'bg-orange-900/30 text-orange-400 border-orange-500/50';
+            case 'medium': return 'bg-yellow-900/30 text-yellow-400 border-yellow-500/50';
+            default: return 'bg-blue-900/30 text-blue-400 border-blue-500/50';
         }
     };
 
     return (
-        <div className="min-h-screen bg-[#0a0a0f] text-gray-100 font-['JetBrains_Mono',_monospace] relative overflow-hidden">
-            {/* Animated background grid */}
-            <div className="fixed inset-0 opacity-20">
-                <div className="absolute inset-0" style={{
-                    backgroundImage: `
-            linear-gradient(rgba(59, 130, 246, 0.1) 1px, transparent 1px),
-            linear-gradient(90deg, rgba(59, 130, 246, 0.1) 1px, transparent 1px)
-          `,
-                    backgroundSize: '50px 50px',
-                    animation: 'gridScroll 20s linear infinite'
-                }}></div>
-            </div>
+        <div className="min-h-screen bg-gray-950 text-gray-100 p-8">
+            <div className="max-w-7xl mx-auto space-y-6">
 
-            {/* Glow effects */}
-            <div className="fixed top-20 left-20 w-96 h-96 bg-blue-500/20 rounded-full blur-[100px] animate-pulse"></div>
-            <div className="fixed bottom-20 right-20 w-96 h-96 bg-cyan-500/10 rounded-full blur-[100px] animate-pulse" style={{ animationDelay: '1s' }}></div>
-
-            <style>{`
-        @keyframes gridScroll {
-          0% { transform: translateY(0); }
-          100% { transform: translateY(50px); }
-        }
-        @keyframes scan {
-          0%, 100% { transform: translateY(0); }
-          50% { transform: translateY(10px); }
-        }
-        @keyframes pulse-glow {
-          0%, 100% { box-shadow: 0 0 20px rgba(59, 130, 246, 0.3); }
-          50% { box-shadow: 0 0 40px rgba(59, 130, 246, 0.6); }
-        }
-        .scan-line {
-          animation: scan 2s ease-in-out infinite;
-        }
-        .glow-border {
-          animation: pulse-glow 2s ease-in-out infinite;
-        }
-      `}</style>
-
-            <div className="relative z-10 max-w-[1600px] mx-auto p-8">
                 {/* Header */}
-                <header className="mb-12 flex items-center justify-between">
-                    <div className="flex items-center gap-4">
-                        <div className="relative">
-                            <Shield className="w-12 h-12 text-blue-400" strokeWidth={1.5} />
-                            <div className="absolute inset-0 bg-blue-500/30 blur-xl"></div>
-                        </div>
+                <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                        <Shield className="w-10 h-10 text-blue-400" />
                         <div>
-                            <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-400 via-cyan-400 to-blue-400 bg-clip-text text-transparent tracking-tight">
-                                SENTINEL GUARD
-                            </h1>
-                            <p className="text-sm text-gray-500 mt-1 tracking-wide">Advanced Threat Protection System</p>
+                            <h1 className="text-3xl font-bold text-white">Malware Detector</h1>
+                            <p className="text-sm text-gray-400">Process Monitor & Threat Detection</p>
                         </div>
                     </div>
 
-                </header>
+                    <button
+                        onClick={startScan}
+                        disabled={isScanning}
+                        className="flex items-center gap-2 px-6 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:cursor-not-allowed rounded-lg font-semibold transition-colors"
+                    >
+                        <Search className="w-5 h-5" />
+                        {isScanning ? 'Scanning...' : 'Scan Now'}
+                    </button>
+                </div>
 
-                {/* Stats Grid */}
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+                {/* Error Display */}
+                {error && (
+                    <div className="bg-red-900/20 border border-red-500/50 rounded-lg p-4 text-red-400">
+                        <strong>Error:</strong> {error}
+                    </div>
+                )}
 
+                {/* Stats Cards */}
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                     <StatCard
-                        icon={Shield}
-                        label="Protection Status"
-                        value={isActiveScans ? "Active" : "Inactive"}
-                        trend="+100%"
+                        icon={Database}
+                        label="Total Processes"
+                        value={totalProcesses}
                         color="blue"
-                        button={
-                            <button style={{ backgroundColor: '#2563eb', height: '40px', width: '120px', borderRadius: '8px', color: 'white' }}
-                                onClick={() => setIsActiveScans(!isActiveScans)} >{isActiveScans ? "Stop Scans" : "Start Scans"}</button>
-
-                        }
                     />
-
                     <StatCard
                         icon={AlertTriangle}
-                        label="Threats Blocked"
+                        label="Threats Detected"
                         value={threats.length}
                         color="red"
                     />
                     <StatCard
-                        icon={Activity}
-                        label="Active Monitoring"
-                        value="Real-time"
-                        trend="24/7"
-                        color="cyan"
+                        icon={Shield}
+                        label="Safe Processes"
+                        value={safeCount}
+                        color="green"
                     />
                     <StatCard
                         icon={Clock}
                         label="Last Scan"
                         value={lastScanTime}
-                        trend="Scheduled"
-                        color="emerald"
+                        color="purple"
+                        small
                     />
                 </div>
 
-                {/* Main Content Grid */}
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                    {/* Scanner Section */}
-                    <div className="lg:col-span-2 space-y-6">
-                        {/* Quick Scan Card */}
-                        <div className="bg-gradient-to-br from-gray-900/90 via-gray-900/70 to-gray-900/90 backdrop-blur-xl border border-gray-800/50 rounded-2xl p-8 relative overflow-hidden">
-                            <div className="absolute top-0 right-0 w-64 h-64 bg-blue-500/5 rounded-full blur-3xl"></div>
-
-                            <div className="relative z-10">
-                                <div className="flex items-center justify-between mb-6">
-                                    <h2 className="text-xl font-bold flex items-center gap-3">
-                                        <Search className="w-6 h-6 text-blue-400" />
-                                        System Scanner
-                                    </h2>
-                                    <div className="flex gap-2">
-                                        <button className="px-3 py-1.5 text-xs bg-gray-800/70 hover:bg-gray-700/70 border border-gray-700 rounded-lg transition-all active">
-                                            Quick
-                                        </button>
-                                        <button className="px-3 py-1.5 text-xs bg-gray-800/70 hover:bg-gray-700/70 border border-gray-700 rounded-lg transition-all">
-                                            Deep
-                                        </button>
-                                        <button className="px-3 py-1.5 text-xs bg-gray-800/70 hover:bg-gray-700/70 border border-gray-700 rounded-lg transition-all">
-                                            Custom
-                                        </button>
-                                    </div>
-                                </div>
-
-                                {isScanning ? (
-                                    <div className="space-y-4">
-                                        <div className="flex items-center justify-between text-sm">
-                                            <span className="text-gray-400">Scanning system files...</span>
-                                            <span className="text-blue-400 font-mono">{scanProgress}%</span>
-                                        </div>
-                                        <div className="relative h-3 bg-gray-800/50 rounded-full overflow-hidden border border-gray-700/50">
-                                            <div
-                                                className="absolute inset-y-0 left-0 bg-gradient-to-r from-blue-500 to-cyan-500 transition-all duration-300 rounded-full"
-                                                style={{ width: `${scanProgress}%` }}
-                                            >
-                                                <div className="absolute inset-0 bg-white/20 animate-pulse"></div>
-                                            </div>
-                                        </div>
-                                        <div className="grid grid-cols-3 gap-4 mt-6">
-                                            <ScanStat icon={Database} label="Files Scanned" value={processlist} />
-                                            <ScanStat icon={Cpu} label="CPU Usage" value="23%" />
-                                            <ScanStat icon={HardDrive} label="Memory" value="1.2 GB" />
-                                        </div>
-                                    </div>
-                                ) : (
-                                    <div className="text-center py-12">
-                                        <div className="inline-block mb-6 relative scan-line">
-                                            <div className="w-24 h-24 rounded-full bg-gradient-to-br from-blue-500/20 to-cyan-500/20 flex items-center justify-center border border-blue-500/30">
-                                                <Search className="w-12 h-12 text-blue-400" />
-                                            </div>
-                                            <div className="absolute inset-0 rounded-full bg-blue-500/20 blur-xl"></div>
-                                        </div>
-                                        <p className="text-gray-400 mb-6">Your system is protected. Run a scan to check for threats.</p>
-                                        <button
-                                            onClick={() => startScan()}
-                                            className="px-8 py-3 bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 rounded-xl font-semibold transition-all duration-300 transform hover:scale-105 glow-border"
-                                        >
-                                            Start Quick Scan
-                                        </button>
-                                    </div>
-                                )}
-                            </div>
+                {/* Scanning Progress */}
+                {isScanning && (
+                    <div className="bg-gray-900 border border-gray-800 rounded-lg p-6">
+                        <div className="flex items-center justify-between mb-3">
+                            <span className="text-sm text-gray-300">Scanning processes...</span>
+                            <span className="text-sm font-mono text-blue-400">{scanProgress}%</span>
                         </div>
+                        <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
+                            <div
+                                className="h-full bg-gradient-to-r from-blue-500 to-cyan-500 transition-all duration-300"
+                                style={{ width: `${scanProgress}%` }}
+                            />
+                        </div>
+                    </div>
+                )}
 
-                        {/* Threats Table */}
-                        <div className="bg-gradient-to-br from-gray-900/90 via-gray-900/70 to-gray-900/90 backdrop-blur-xl border border-gray-800/50 rounded-2xl p-6 overflow-hidden">
-                            <div className="flex items-center justify-between mb-6">
-                                <h2 className="text-xl font-bold flex items-center gap-3">
-                                    <FileWarning className="w-6 h-6 text-red-400" />
-                                    Detected Threats
-                                </h2>
-                                <span className="text-sm text-gray-500">{threats.length} items</span>
-                            </div>
+                {/* Threats List */}
 
-                            <div className="space-y-3">
-                                {threats.map((threat, index) => (
+
+                <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+                    <div className="p-6 border-b border-gray-800">
+                        <h2 className="text-xl font-bold flex items-center gap-2">
+                            <AlertTriangle className="w-6 h-6 text-red-400" />
+                            Detected Threats
+                            <span className="ml-auto text-sm text-gray-400">{threats.length} items</span>
+                        </h2>
+                    </div>
+                    {isScanning && (
+                        <div className="p-4 border-b border-gray-800">
+                            <h3 className="text-sm text-blue-400 mb-3 flex items-center gap-2">
+                                <Activity className="w-4 h-4 animate-pulse" />
+                                Scanning running processes
+                            </h3>
+
+                            <div className="max-h-60 overflow-y-auto space-y-2 font-mono text-sm">
+                                {runningProcesses.map((p) => (
                                     <div
-                                        key={threat.id}
-                                        className="group bg-gray-800/30 hover:bg-gray-800/50 border border-gray-700/30 rounded-xl p-4 transition-all duration-300 cursor-pointer"
-                                        style={{ animationDelay: `${index * 100}ms` }}
+                                        key={`${p.pid}-${p.name}`}
+                                        className="flex justify-between bg-gray-800/40 px-3 py-2 rounded"
                                     >
-                                        <div className="flex items-start justify-between">
-                                            <div className="flex-1">
-                                                <div className="flex items-center gap-3 mb-2">
-                                                    <span className={`px-2 py-1 text-xs font-mono rounded-lg border ${getSeverityColor(threat.severity)} uppercase tracking-wider`}>
-                                                        {threat.severity}
-                                                    </span>
-                                                    <span className="font-semibold text-gray-200">{threat.name}</span>
-                                                </div>
-                                                <p className="text-sm text-gray-500 font-mono mb-2">{threat.path}</p>
-                                                <div className="flex items-center gap-4 text-xs text-gray-600">
-                                                    <span className="flex items-center gap-1">
-                                                        <Clock className="w-3 h-3" />
-                                                        {threat.time}
-                                                    </span>
-                                                    <span className={`px-2 py-0.5 rounded ${threat.status === 'quarantined' ? 'bg-blue-500/10 text-blue-400' : 'bg-yellow-500/10 text-yellow-400'}`}>
-                                                        {threat.status}
-                                                    </span>
-                                                </div>
-                                            </div>
-                                            <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                                                <button className="p-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-lg transition-all">
-                                                    <Trash2 className="w-4 h-4" />
-                                                </button>
-                                                <button className="p-2 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 rounded-lg transition-all">
-                                                    <ChevronRight className="w-4 h-4" />
-                                                </button>
-                                            </div>
-                                        </div>
+                                        <span className="truncate w-200">
+
+                                            {p.path || 'Unknown'} (PID {p.pid})
+                                        </span>
+
+                                        <span className="text-gray-400">
+                                            {p.memory}
+                                        </span>
                                     </div>
                                 ))}
                             </div>
                         </div>
+                    )}
+
+                    <div className="divide-y divide-gray-800">
+                        {threats.length === 0 ? (
+                            <div className="p-12 text-center">
+                                <Shield className="w-16 h-16 text-green-400 mx-auto mb-4 opacity-50" />
+                                <p className="text-gray-400">No threats detected. Your system is clean!</p>
+                                <p className="text-sm text-gray-500 mt-2">Click "Scan Now" to check for threats</p>
+                            </div>
+                        ) : (
+                            threats.map((threat) => (
+                                <div
+                                    key={threat.id}
+                                    className="p-4 hover:bg-gray-800/50 transition-colors"
+                                >
+                                    <div className="flex items-start justify-between gap-4">
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex items-center gap-2 mb-2">
+                                                <span className={`px-2 py-1 text-xs font-semibold rounded border ${getSeverityColor(threat.severity)} uppercase`}>
+                                                    {threat.severity}
+                                                </span>
+                                                <span className="font-semibold text-white">{threat.name}</span>
+                                                <span className="text-gray-500 text-sm">PID: {threat.pid}</span>
+                                            </div>
+
+                                            <p className="text-sm text-gray-400 font-mono truncate mb-2">
+                                                {threat.path}
+                                            </p>
+
+                                            <div className="flex items-center gap-3 text-xs text-gray-500">
+                                                <span>Detected: {threat.time}</span>
+                                                <span>•</span>
+                                                <span>Reasons: {threat.reasons.join(', ')}</span>
+                                            </div>
+                                        </div>
+
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-2xl font-bold text-red-400">
+                                                {threat.score}
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))
+                        )}
                     </div>
+                </div>
 
-                    {/* Right Sidebar */}
-                    <div className="space-y-6">
-                        {/* System Health */}
-                        <div className="bg-gradient-to-br from-gray-900/90 via-gray-900/70 to-gray-900/90 backdrop-blur-xl border border-gray-800/50 rounded-2xl p-6">
-                            <h3 className="text-lg font-bold mb-6 flex items-center gap-2">
-                                <Activity className="w-5 h-5 text-emerald-400" />
-                                System Health
-                            </h3>
-                            <div className="space-y-4">
-                                <HealthItem label="Real-time Protection" status="active" value="100%" color="emerald" />
-                                <HealthItem label="Firewall" status="active" value="100%" color="emerald" />
-                                <HealthItem label="Web Protection" status="active" value="100%" color="emerald" />
-                                <HealthItem label="Email Scanner" status="active" value="100%" color="blue" />
-                            </div>
-                        </div>
-
-                        {/* Quick Actions */}
-                        <div className="bg-gradient-to-br from-gray-900/90 via-gray-900/70 to-gray-900/90 backdrop-blur-xl border border-gray-800/50 rounded-2xl p-6">
-                            <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
-                                <Zap className="w-5 h-5 text-yellow-400" />
-                                Quick Actions
-                            </h3>
-                            <div className="space-y-2">
-                                <ActionButton icon={Search} label="Full System Scan" />
-                                <ActionButton icon={Shield} label="Update Definitions" />
-                                <ActionButton icon={FileWarning} label="View Quarantine" />
-                                <ActionButton icon={Settings} label="Configure Rules" />
-                            </div>
-                        </div>
-
-                        {/* Recent Activity */}
-                        <div className="bg-gradient-to-br from-gray-900/90 via-gray-900/70 to-gray-900/90 backdrop-blur-xl border border-gray-800/50 rounded-2xl p-6">
-                            <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
-                                <Clock className="w-5 h-5 text-cyan-400" />
-                                Activity Log
-                            </h3>
-                            <div className="space-y-3 text-sm">
-                                <ActivityItem time="14:32" message="Threat blocked" type="success" />
-                                <ActivityItem time="13:15" message="Scan completed" type="info" />
-                                <ActivityItem time="12:08" message="Definitions updated" type="info" />
-                                <ActivityItem time="11:45" message="Suspicious file detected" type="warning" />
-                            </div>
-                        </div>
-                    </div>
+                {/* Footer Info */}
+                <div className="text-center text-sm text-gray-500">
+                    Auto-refreshing every 10 seconds • Detection threshold: Score ≥ 2
                 </div>
             </div>
         </div>
     );
 }
 
-function StatCard({ icon: Icon, label, value, trend, color, button }) {
+function StatCard({ icon: Icon, label, value, color, small = false }) {
     const colors = {
-        blue: 'from-blue-500/20 to-cyan-500/20 border-blue-500/30',
-        red: 'from-red-500/20 to-orange-500/20 border-red-500/30',
-        cyan: 'from-cyan-500/20 to-blue-500/20 border-cyan-500/30',
-        emerald: 'from-emerald-500/20 to-green-500/20 border-emerald-500/30'
+        blue: 'from-blue-900/50 to-blue-800/50 border-blue-700/50',
+        red: 'from-red-900/50 to-red-800/50 border-red-700/50',
+        green: 'from-green-900/50 to-green-800/50 border-green-700/50',
+        purple: 'from-purple-900/50 to-purple-800/50 border-purple-700/50',
     };
 
     const iconColors = {
         blue: 'text-blue-400',
         red: 'text-red-400',
-        cyan: 'text-cyan-400',
-        emerald: 'text-emerald-400'
+        green: 'text-green-400',
+        purple: 'text-purple-400',
     };
 
     return (
-        <div className={`bg-gradient-to-br ${colors[color]} backdrop-blur-xl border rounded-2xl p-6 relative overflow-hidden group hover:scale-105 transition-transform duration-300`}>
-            <div className="absolute top-0 right-0 w-32 h-32 bg-white/5 rounded-full blur-2xl group-hover:bg-white/10 transition-all"></div>
-            <div className="relative z-10">
-                <div className="flex items-center justify-between mb-4">
-                    <Icon className={`w-8 h-8 ${iconColors[color]}`} strokeWidth={1.5} />
-                    <TrendingUp className="w-4 h-4 text-gray-500" />
-                </div>
-                <div className="text-3xl font-bold mb-1 bg-gradient-to-r from-white to-gray-300 bg-clip-text text-transparent">
-                    {value}
-                </div>
-                <div className="text-sm text-gray-400 mb-2">{label}</div>
-                <div className="text-xs text-gray-500">{trend}</div>
+        <div className={`bg-gradient-to-br ${colors[color]} border rounded-lg p-5`}>
+            <div className="flex items-center gap-3 mb-2">
+                <Icon className={`w-5 h-5 ${iconColors[color]}`} />
+                <span className="text-sm text-gray-400">{label}</span>
             </div>
-            {button && <div className="mt-4">{button}</div>}
-        </div>
-    );
-}
-
-function ScanStat({ icon: Icon, label, value }) {
-    return (
-        <div className="text-center">
-            <Icon className="w-6 h-6 text-blue-400 mx-auto mb-2" />
-            <div className="text-lg font-bold text-gray-200">{value}</div>
-            <div className="text-xs text-gray-500">{label}</div>
-        </div>
-    );
-}
-
-function HealthItem({ label, status, value, color }) {
-    const colors = {
-        emerald: 'bg-emerald-500',
-        blue: 'bg-blue-500'
-    };
-
-    return (
-        <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-                <div className={`w-2 h-2 rounded-full ${colors[color]} animate-pulse`}></div>
-                <span className="text-sm text-gray-300">{label}</span>
+            <div className={`${small ? 'text-lg' : 'text-3xl'} font-bold text-white`}>
+                {value}
             </div>
-            <span className="text-xs text-gray-500 font-mono">{value}</span>
-        </div>
-    );
-}
-
-function ActionButton({ icon: Icon, label }) {
-    return (
-        <button className="w-full flex items-center gap-3 px-4 py-3 bg-gray-800/30 hover:bg-gray-700/50 border border-gray-700/30 hover:border-gray-600/50 rounded-xl transition-all duration-300 group">
-            <Icon className="w-4 h-4 text-gray-400 group-hover:text-blue-400 transition-colors" />
-            <span className="text-sm text-gray-300 group-hover:text-gray-100 transition-colors">{label}</span>
-            <ChevronRight className="w-4 h-4 ml-auto text-gray-600 group-hover:text-gray-400 transition-colors" />
-        </button>
-    );
-}
-
-function ActivityItem({ time, message, type }) {
-    const colors = {
-        success: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
-        info: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
-        warning: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30'
-    };
-
-    return (
-        <div className="flex items-start gap-3">
-            <span className="text-xs text-gray-600 font-mono mt-1">{time}</span>
-            <span className={`text-xs px-2 py-1 rounded border ${colors[type]}`}>{message}</span>
         </div>
     );
 }
