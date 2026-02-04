@@ -2,15 +2,19 @@
 import React, { useState, useEffect } from 'react';
 import { Shield, AlertTriangle, Activity, Search, Trash2, Settings, FileWarning, Clock, TrendingUp, Zap, ChevronRight, Database, Cpu, HardDrive } from 'lucide-react';
 
+
+
+
+
 export default function AntispywareDashboard() {
     const [activeScans, setActiveScans] = useState(0);
-    const [threats, setThreats] = useState([
-        { id: 1, name: 'Keylogger.Win32.Agent', severity: 'critical', path: 'C:\\Users\\AppData\\temp\\malware.exe', time: '2 min ago', status: 'quarantined' },
-        { id: 2, name: 'Spyware.Generic.Tracker', severity: 'high', path: 'C:\\Program Files\\Unknown\\tracker.dll', time: '15 min ago', status: 'detected' },
-        { id: 3, name: 'Adware.Browser.Extension', severity: 'medium', path: 'C:\\Users\\Extensions\\ad-inject.js', time: '1 hour ago', status: 'quarantined' },
-    ]);
+    const [threats, setThreats] = useState([]);
     const [scanProgress, setScanProgress] = useState(0);
     const [isScanning, setIsScanning] = useState(false);
+    const [processlist, setProcesslist] = useState(0);
+    const [safe, setSafe] = useState([]);
+    const [isActiveScans, setIsActiveScans] = useState(false);
+    const [lastScanTime, setLastScanTime] = useState("Never");
 
     useEffect(() => {
         if (isScanning) {
@@ -27,9 +31,51 @@ export default function AntispywareDashboard() {
         }
     }, [isScanning]);
 
-    const startScan = () => {
+    useEffect(() => {
+        if (isScanning || isActiveScans) {
+            // Simulate fetching detected threats
+            const fetchScan = async () => {
+                try {
+                    const response = await fetch('http://localhost:8000/scan');
+                    const data = await response.json();
+                    setThreats(data.alerts);
+                    setProcesslist(data.total_processes);
+                    setSafe(data.safe);
+
+
+                } catch (err) {
+                    console.error(err);
+                }
+
+            }
+            fetchScan();
+            if (isActiveScans) {
+                const date = new Date();
+                setLastScanTime(date.toLocaleString());
+                const interval = setInterval(fetchScan, 5000);
+                return () => clearInterval(interval);
+            }
+        }
+    }, [isScanning, isActiveScans]);
+
+    const startScan = async () => {
         setIsScanning(true);
         setScanProgress(0);
+        try {
+            const res = await fetch('http://localhost:8000/scan');
+            const data = await res.json();
+            setThreats(data.alerts);
+            setProcesslist(data.total_processes);
+            setSafe(data.safe);
+            console.log(data);
+            const date = new Date();
+            setLastScanTime(date.toLocaleString());
+            const interval = setInterval(startScan, 5000);
+            return () => clearInterval(interval);
+
+        } catch (err) { console.log(err) }
+
+
     };
 
     const getSeverityColor = (severity) => {
@@ -95,28 +141,29 @@ export default function AntispywareDashboard() {
                             <p className="text-sm text-gray-500 mt-1 tracking-wide">Advanced Threat Protection System</p>
                         </div>
                     </div>
-                    <div className="flex gap-4">
-                        <button className="px-4 py-2 bg-gray-800/50 hover:bg-gray-700/50 border border-gray-700 rounded-lg transition-all duration-300 flex items-center gap-2">
-                            <Settings className="w-4 h-4" />
-                            Settings
-                        </button>
-                    </div>
+
                 </header>
 
                 {/* Stats Grid */}
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+
                     <StatCard
                         icon={Shield}
                         label="Protection Status"
-                        value="ACTIVE"
+                        value={isActiveScans ? "Active" : "Inactive"}
                         trend="+100%"
                         color="blue"
+                        button={
+                            <button style={{ backgroundColor: '#2563eb', height: '40px', width: '120px', borderRadius: '8px', color: 'white' }}
+                                onClick={() => setIsActiveScans(!isActiveScans)} >{isActiveScans ? "Stop Scans" : "Start Scans"}</button>
+
+                        }
                     />
+
                     <StatCard
                         icon={AlertTriangle}
                         label="Threats Blocked"
-                        value="1,247"
-                        trend="+23 today"
+                        value={threats.length}
                         color="red"
                     />
                     <StatCard
@@ -129,7 +176,7 @@ export default function AntispywareDashboard() {
                     <StatCard
                         icon={Clock}
                         label="Last Scan"
-                        value="2 hrs ago"
+                        value={lastScanTime}
                         trend="Scheduled"
                         color="emerald"
                     />
@@ -150,7 +197,7 @@ export default function AntispywareDashboard() {
                                         System Scanner
                                     </h2>
                                     <div className="flex gap-2">
-                                        <button className="px-3 py-1.5 text-xs bg-gray-800/70 hover:bg-gray-700/70 border border-gray-700 rounded-lg transition-all">
+                                        <button className="px-3 py-1.5 text-xs bg-gray-800/70 hover:bg-gray-700/70 border border-gray-700 rounded-lg transition-all active">
                                             Quick
                                         </button>
                                         <button className="px-3 py-1.5 text-xs bg-gray-800/70 hover:bg-gray-700/70 border border-gray-700 rounded-lg transition-all">
@@ -177,7 +224,7 @@ export default function AntispywareDashboard() {
                                             </div>
                                         </div>
                                         <div className="grid grid-cols-3 gap-4 mt-6">
-                                            <ScanStat icon={Database} label="Files Scanned" value="24,567" />
+                                            <ScanStat icon={Database} label="Files Scanned" value={processlist} />
                                             <ScanStat icon={Cpu} label="CPU Usage" value="23%" />
                                             <ScanStat icon={HardDrive} label="Memory" value="1.2 GB" />
                                         </div>
@@ -192,7 +239,7 @@ export default function AntispywareDashboard() {
                                         </div>
                                         <p className="text-gray-400 mb-6">Your system is protected. Run a scan to check for threats.</p>
                                         <button
-                                            onClick={startScan}
+                                            onClick={() => startScan()}
                                             className="px-8 py-3 bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 rounded-xl font-semibold transition-all duration-300 transform hover:scale-105 glow-border"
                                         >
                                             Start Quick Scan
@@ -303,7 +350,7 @@ export default function AntispywareDashboard() {
     );
 }
 
-function StatCard({ icon: Icon, label, value, trend, color }) {
+function StatCard({ icon: Icon, label, value, trend, color, button }) {
     const colors = {
         blue: 'from-blue-500/20 to-cyan-500/20 border-blue-500/30',
         red: 'from-red-500/20 to-orange-500/20 border-red-500/30',
@@ -332,6 +379,7 @@ function StatCard({ icon: Icon, label, value, trend, color }) {
                 <div className="text-sm text-gray-400 mb-2">{label}</div>
                 <div className="text-xs text-gray-500">{trend}</div>
             </div>
+            {button && <div className="mt-4">{button}</div>}
         </div>
     );
 }
