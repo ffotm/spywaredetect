@@ -39,3 +39,15 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+electron.exe
+dist/
+*.exe
+node_modules/
+electron/node_modules/
+
+# Electron and large binaries
+electron.exe
+*.exe
+dist/
+node_modules/
+electron/node_modules/
