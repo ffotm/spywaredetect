@@ -1,0 +1,6 @@
+# Electron dependencies
+/node_modules
+/dist
+/build
+*.exe
+*.dll
