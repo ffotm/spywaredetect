@@ -2,6 +2,9 @@ import psutil
 from collections import Counter
 import time
 import os
+from db import Database
+
+db = Database()
 
 # -----------------------
 # Helper functions
@@ -53,13 +56,13 @@ def scan_processes():
                 info['cpu_percent'] = p.cpu_percent(interval=0.1)
             except:
                 info['cpu_percent'] = 0
-            processes.append(info)
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            continue
+            
+            # Get number of connections
             try: 
                 info['num_connections'] = len(p.connections())
             except:
                 info["num_connections"] = 0
+                
             processes.append(info)
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
@@ -117,11 +120,15 @@ def scan_processes():
             reasons.append("high_connections")
         #6 check if the process executable is hidden
         if p.get("exe") and os.path.isfile(p["exe"]):
-            attrs = os.stat(p["exe"]).st_file_attributes
-            if attrs & 0x2:  #thats the flag for hidden in windows so it's comparing the attrs gotten and the flag
-               #& is used for comparison en binaire of just the flag (00000010)
-                score += 2
-                reasons.append("hidden_executable")
+            try:
+                attrs = os.stat(p["exe"]).st_file_attributes
+                if attrs & 0x2:  #thats the flag for hidden in windows so it's comparing the attrs gotten and the flag
+                   #& is used for comparison en binaire of just the flag (00000010)
+                    score += 2
+                    reasons.append("hidden_executable")
+            except AttributeError:
+                # st_file_attributes doesn't exist on non-Windows systems
+                pass
 
         # FIXED: Format the alert/safe entry with proper structure for frontend
         entry = {
@@ -131,7 +138,7 @@ def scan_processes():
             "path": p.get("exe") or "N/A",
             "score": score,
             "reasons": reasons,
-            "severity": "critical" if score >= 3 else "high" if score >= 2 else "medium",
+            "severity": "critical" if score >= 3 else "warning" if score >= 2 else "info",
             "time": time.strftime("%H:%M:%S"),
             "status": "detected" if score >= 2 else "safe"
         }
@@ -172,6 +179,115 @@ def stream_processes():
         "data": {},
         "status": "complete"
     }
+
+def store_scan_results(scan_data):
+   
+    print("Storing scan results to database...")
+    
+    # Create scan record
+    scan_id = db.create_scan(scan_type="quick")
+    print(f"Created scan with ID: {scan_id}")
+    
+    try:
+        # Dictionary to map PID -> process UUID from database
+        pid_to_uuid = {}
+        
+        # Log all processes FIRST (so we get their UUIDs)
+        for p in scan_data['processes']:
+            mem_info = p.get("memory_info")
+            memory_mb = mem_info.rss / (1024 * 1024) if mem_info else 0
+            cpu_percent = p.get('cpu_percent', 0)
+            
+            # Find if this process has an alert
+            alert = next((a for a in scan_data['alerts'] if a['pid'] == p['pid']), None)
+            
+            # Store process and get its UUID
+            process_uuid = db.log_process(
+                scan_id=scan_id,
+                process_id=p['pid'],
+                name=p.get('name') or 'Unknown',
+                path=p.get('exe') or 'N/A',
+                score=alert['score'] if alert else 0,
+                threads=p.get('num_threads', 0),
+                connections=p.get('num_connections', 0),
+                reasons=alert['reasons'] if alert else [],
+                severity=alert['severity'] if alert else 'info',
+                signed=False,
+                cpu_usage=cpu_percent,
+                memory_usage=memory_mb
+            )
+            
+            # Map PID to the database UUID
+            if process_uuid:
+                pid_to_uuid[p['pid']] = process_uuid
+        
+        print(f"✓ Logged {len(scan_data['processes'])} processes")
+        
+        # Now log alerts with the correct process UUIDs
+        alerts_logged = 0
+        for alert in scan_data['alerts']:
+            pid = alert['pid']
+            process_uuid = pid_to_uuid.get(pid)
+            
+            if process_uuid:
+                db.log_alert(
+                    scan_id=scan_id,
+                    process_uuid=process_uuid,  # ← Use UUID, not PID
+                    severity=alert['severity'],
+                    title=f"Suspicious Process: {alert['name']}",
+                    path=alert['path'],
+                    score=alert['score'],
+                    reasons=alert['reasons']
+                )
+                alerts_logged += 1
+            else:
+                print(f"⚠ Warning: Could not find UUID for PID {pid}, skipping alert")
+        
+        print(f"✓ Logged {alerts_logged}/{len(scan_data['alerts'])} alerts")
+        
+        # Calculate risk level and complete scan
+        total_alerts = len(scan_data['alerts'])
+        critical_alerts = len([a for a in scan_data['alerts'] if a['severity'] == 'critical'])
+        high_alerts = len([a for a in scan_data['alerts'] if a['severity'] == 'warning'])
+        
+        # Calculate risk score
+        risk_score = (critical_alerts * 10) + (high_alerts * 5) + (total_alerts * 2)
+        
+        # Determine risk level
+        if risk_score >= 30:
+            risk_level = "critical"
+        elif risk_score >= 15:
+            risk_level = "high"
+        elif risk_score >= 5:
+            risk_level = "medium"
+        else:
+            risk_level = "low"
+        
+        db.complete_scan(
+            risk_level=risk_level,
+            risk_score=risk_score,
+            scan_id=scan_id,
+            status="completed"
+        )
+        
+        print(f"✓ Scan completed with risk level: {risk_level} (score: {risk_score})")
+        return scan_id
+        
+    except Exception as e:
+        print(f"✗ Error storing scan results: {e}")
+        import traceback
+        traceback.print_exc()
+        # If anything fails, mark scan as failed
+        try:
+            db.complete_scan(
+                risk_level="unknown",
+                risk_score=0,
+                scan_id=scan_id,
+                status="failed"
+            )
+        except:
+            pass
+        raise e
 
 
 # Test the function

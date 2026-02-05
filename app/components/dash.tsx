@@ -1,7 +1,8 @@
 'use client'
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Shield, AlertTriangle, Activity, Search, Clock, Zap, Database } from 'lucide-react';
 import { pid } from 'process';
+
 
 export default function AntispywareDashboard() {
     const [threats, setThreats] = useState([]);
@@ -13,6 +14,8 @@ export default function AntispywareDashboard() {
     const [error, setError] = useState(null);
     const [safe, setSafe] = useState(0);
     const [runningProcesses, setRunningProcesses] = useState([]);
+    const [scanLogs, setScanLogs] = useState([]);
+
 
     const fetchScan = async () => {
         try {
@@ -45,6 +48,7 @@ export default function AntispywareDashboard() {
         setScanProgress(0);
         streamScan();
 
+
         // Simulate progress bar
         const progressInterval = setInterval(() => {
             setScanProgress(prev => {
@@ -57,6 +61,7 @@ export default function AntispywareDashboard() {
         }, 200);
 
         await fetchScan();
+        await databaselog();
 
         clearInterval(progressInterval);
         setScanProgress(100);
@@ -106,7 +111,33 @@ export default function AntispywareDashboard() {
         }
     }
 
+    const containerRef = useRef(null);
 
+    useEffect(() => {
+        if (!containerRef.current) return;
+        const el = containerRef.current;
+        el.scrollTop = el.scrollHeight;
+    }, [runningProcesses]);
+
+    const databaselog = async () => {
+        try {
+            console.log("Storing scan to database...");
+            const response = await fetch('http://localhost:8000/scan/store', {
+                method: 'POST',
+            });
+
+            if (!response.ok) {
+                throw new Error(`Database storage failed: ${response.status}`);
+            }
+
+            const data = await response.json();
+            console.log("Scan stored successfully:", data.scan_id);
+
+        } catch (err) {
+            console.error("❌ Database log error:", err);
+            setError(`Failed to store scan: ${err.message}`);
+        }
+    }
 
     const getSeverityColor = (severity) => {
         switch (severity) {
@@ -211,7 +242,7 @@ export default function AntispywareDashboard() {
                                 Scanning running processes
                             </h3>
 
-                            <div className="max-h-60 overflow-y-auto space-y-2 font-mono text-sm">
+                            <div className="max-h-60 overflow-y-auto space-y-2 font-mono text-sm" ref={containerRef} style={{ height: "100px", overflow: "auto" }}>
                                 {runningProcesses.map((p) => (
                                     <div
                                         key={`${p.pid}-${p.name}`}
@@ -227,6 +258,7 @@ export default function AntispywareDashboard() {
                                         </span>
                                     </div>
                                 ))}
+
                             </div>
                         </div>
                     )}
