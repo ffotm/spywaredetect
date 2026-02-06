@@ -68,7 +68,7 @@ def scan_processes():
             continue
             
                 
-    # collect execution directories
+    # collect execution directories 
     dirs = []
     for p in processes:
         d = get_dir(p.get("exe"))
