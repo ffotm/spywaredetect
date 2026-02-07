@@ -3,9 +3,50 @@ from collections import Counter
 import time
 import os
 from db import Database
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from collections import defaultdict
+import threading
 
 db = Database()
 
+file_activity_by_pid = defaultdict(int)
+file_activity_global = 0
+lock = threading.Lock()
+
+#watchdog class 
+class FileEventHandler(FileSystemEventHandler):
+    def on_created(self, event):
+        print(f"File created: {event.src_path}")
+    def on_modified(self, event):
+        print(f"File modified: {event.src_path}")
+    def on_deleted(self, event):
+        print(f"File deleted: {event.src_path}")
+    def on_moved(self, event):
+        print(f"File moved: {event.src_path} to {event.dest_path}")
+
+    
+    def on_any_event(self, event):
+        if event.is_directory:
+            return
+        global file_activity_global 
+        with lock:
+            file_activity_global += 1
+        p = get_process_from_path(event.src_path)
+        if p:
+            with lock:
+                file_activity_by_pid[p.pid] += 1
+
+def start_file_monitoring():
+    observer = Observer()
+    event_handler = FileEventHandler()
+    path_to_monitor = [os.path.expanduser("~/Documents"), os.path.expanduser("~/Downloads"), os.path.expanduser("~/Desktop")] 
+    for path in path_to_monitor:
+        if os.path.exists(path):
+            observer.schedule(event_handler, path=path, recursive=True)
+    observer.daemon = True
+    observer.start()
+    return observer
 # -----------------------
 # Helper functions
 # -----------------------
@@ -21,26 +62,46 @@ def get_dir(path):
     return "/".join(parts[:-1])
     # join() glues the parts back together with /
 
+def get_process_from_path(path): #after watchdog gives us the path we run it here to get the process that is using this path
+    for p in psutil.process_iter(['pid', 'name']):
+        try:
+            for f in p.open_files():
+                if f.path == path:
+                    return p
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return None
 
 # -----------------------
 # Main scanning logic
 # -----------------------
 
-def scan_processes():
-    processes = []
 
-    # FIXED: Improved CPU warming - need longer interval for accurate readings
-    print("Warming up CPU measurements...")
+def scan_processes():
+
+    global file_activity_by_pid, file_activity_global
+    with lock:
+        file_activity_by_pid_snapshot = dict(file_activity_by_pid)
+        file_activity_global_snapshot = file_activity_global
+        file_activity_by_pid = defaultdict(int)
+        file_activity_global = 0
+    
+    processes = []
+    process_objects = {}  #dict of objects to be able to access the processes later for more info like children and open files without having to call psutil again 
+
+    #warming up for accumulations
+    print("Warming up cpu")
     for p in psutil.process_iter():
         try:
-            p.cpu_percent(interval=0)  # First call initializes
+            p.cpu_percent(interval=0)  #first call init
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
     
-    # FIXED: Wait a moment for CPU stats to accumulate
+    # give it a moment to accumulate some cpu usage data
     time.sleep(0.5)
 
-    # Now collect actual process info with real CPU values
+    #now collect actual process info
+    count = 0
     for p in psutil.process_iter([
         "pid",
         "name",
@@ -51,24 +112,29 @@ def scan_processes():
     ]):
         try:
             info = p.info
-            # FIXED: Get CPU percent with a small interval for this specific process
+            # Get cpu percent of this specific process every 0.1
             try:
                 info['cpu_percent'] = p.cpu_percent(interval=0.1)
             except:
                 info['cpu_percent'] = 0
             
-            # Get number of connections
-            try: 
-                info['num_connections'] = len(p.connections())
+            # Get number of connections for this process
+            try:
+                info['num_connections'] = len(p.net_connections())
             except:
                 info["num_connections"] = 0
                 
             processes.append(info)
+            process_objects[info['pid']] = p  # Store the actual Process object
+            count += 1
+            if count % 50 == 0:  #log for debug
+                print(f"Processed {count} processes...")
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
             
+    print(f"Collected {len(processes)} processes")
                 
-    # collect execution directories 
+    # collect exe directories 
     dirs = []
     for p in processes:
         d = get_dir(p.get("exe"))
@@ -88,9 +154,13 @@ def scan_processes():
     alerts = []
     safe = []
 
+
     for p in processes:
         score = 0
         reasons = []
+        
+        # Get the actual Process object for this process
+        proc_obj = process_objects.get(p["pid"])
 
         #1 check if execution path is rare
         if is_rare_path(p.get("exe")):
@@ -122,13 +192,55 @@ def scan_processes():
         if p.get("exe") and os.path.isfile(p["exe"]):
             try:
                 attrs = os.stat(p["exe"]).st_file_attributes
-                if attrs & 0x2:  #thats the flag for hidden in windows so it's comparing the attrs gotten and the flag
-                   #& is used for comparison en binaire of just the flag (00000010)
+                if attrs & 0x2:  #0x2 is the flag for hidden in windows so it's comparing the attrs gotten and the flag
+                   # & is used for comparison en binaire of just the flag (00000010)
                     score += 2
                     reasons.append("hidden_executable")
             except AttributeError:
-                # st_file_attributes doesn't exist on non-Windows systems
                 pass
+        
+        #7 check if the process is creating child processes rapidly (more than 10 in the last minute)
+        if proc_obj:
+            try:
+                children = proc_obj.children()
+                recent_children = [c for c in children if time.time() - c.create_time() < 60]
+                if len(recent_children) > 10:
+                    score += 1
+                    reasons.append("rapid_child_creation")
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+        
+        #8 check if the process is modifying files in sensitive directories (like system32 or program files)
+        if proc_obj:
+            try:
+                for f in proc_obj.open_files():
+                    if "system32" in f.path.lower() or "program files" in f.path.lower():
+                        score += 2
+                        reasons.append("modifying_sensitive_files")
+                        break
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+        
+        #9 check if the process is creating child processes with suspicious names (like "cmd.exe" or "powershell.exe")
+        if proc_obj:
+            try:
+                for c in proc_obj.children():
+                    if c.name().lower() in ["cmd.exe", "powershell.exe"]:
+                        score += 1
+                        reasons.append("creating_suspicious_children")
+                        break
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+        
+        #10 file activity monitoring
+        activity_count = file_activity_by_pid_snapshot.get(p["pid"], 0)
+        if activity_count > 20:  # threshold for suspicious file activity
+            score += 1
+            reasons.append("high_file_activity")
+        if file_activity_global_snapshot > 200:  # if there's a lot of file activity overall, it could indicate a system-wide issue
+            score += 1
+            reasons.append("high_global_file_activity")
+       
 
         # FIXED: Format the alert/safe entry with proper structure for frontend
         entry = {
@@ -138,7 +250,7 @@ def scan_processes():
             "path": p.get("exe") or "N/A",
             "score": score,
             "reasons": reasons,
-            "severity": "critical" if score >= 3 else "warning" if score >= 2 else "info",
+            "severity": "critical" if score >= 4 else "warning" if score >= 3 else "info",
             "time": time.strftime("%H:%M:%S"),
             "status": "detected" if score >= 2 else "safe"
         }
@@ -292,11 +404,20 @@ def store_scan_results(scan_data):
 
 # Test the function
 if __name__ == "__main__":
+    observer = start_file_monitoring()
+    print("File monitoring started. Running scan...")
     result = scan_processes()
     print(f"\nTotal processes: {result['total_processes']}")
     print(f"Alerts: {len(result['alerts'])}")
     print(f"Safe: {len(result['safe'])}")
-    
     if result['alerts']:
         print("\nSample alert:")
         print(result['alerts'][0])
+    
+    print("\nMonitoring files... Press Ctrl+C to stop")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+        observer.join()
