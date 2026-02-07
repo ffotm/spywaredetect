@@ -199,7 +199,7 @@ def scan_processes():
             except AttributeError:
                 pass
         
-        #7 check if the process is creating child processes rapidly (more than 10 in the last minute)
+        #7check if the process is creating child processes rapidly (more than 10 in the last minute)
         if proc_obj:
             try:
                 children = proc_obj.children()
@@ -210,7 +210,7 @@ def scan_processes():
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 pass
         
-        #8 check if the process is modifying files in sensitive directories (like system32 or program files)
+        #8check if the process is modifying files in sensitive directories (like system32 or program files)
         if proc_obj:
             try:
                 for f in proc_obj.open_files():
