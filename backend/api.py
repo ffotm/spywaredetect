@@ -47,7 +47,7 @@ def store_scan():
 
 @app.get("/")
 def read_root():
-    return {"message": "Spyware Detection API is running."}
+    return {"message": "Detection API is running."}
 
 
 if __name__ == "__main__":
