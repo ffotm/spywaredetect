@@ -1,5 +1,14 @@
+import sys
+import os
+from pathlib import Path
+
+# CRITICAL: Add backend directory to Python path for local imports
+backend_dir = Path(__file__).parent.resolve()
+if str(backend_dir) not in sys.path:
+    sys.path.insert(0, str(backend_dir))
+
 from fastapi import FastAPI
-from scanner import scan_processes, stream_processes, store_scan_results  # ← ADD store_scan_results
+from scanner import scan_processes, stream_processes, store_scan_results
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -14,6 +23,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
 
 @app.get("/scan")
 def scan():
@@ -44,11 +57,12 @@ def store_scan():
     return scan_data
 
 
-
 @app.get("/")
 def read_root():
     return {"message": "Detection API is running."}
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    print(f"Starting Malware Detection API on port {port}...", flush=True)
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
