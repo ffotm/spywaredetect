@@ -1,5 +1,6 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge } = require('electron');
 
-contextBridge.exposeInMainWorld('electron', {
-    getBackendUrl: () => ipcRenderer.invoke('get-backend-url')
+// Expose a safe API to the renderer process
+contextBridge.exposeInMainWorld('electronAPI', {
+    getBackendUrl: () => 'http://localhost:8000' // Always point to localhost:8000
 });

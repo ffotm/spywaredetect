@@ -2,33 +2,33 @@
     "name": "malware-detector",
     "version": "1.0.0",
     "description": "Advanced Malware Detection System",
-    "author": "Otmani ",
+    "author": "twinklover",
     "main": "electron/main.js",
     "private": true,
     "scripts": {
         "dev": "next dev",
+        "build": "next build",
+        "postbuild": "echo 'Build complete'",
         "start": "next start",
+        "export": "next build",
         "lint": "eslint",
         "electron:dev": "electron electron/main.js",
+        "prepackage": "npm run export",
         "package": "electron-builder build --win --publish never"
     },
     "build": {
         "appId": "com.malwaredetector.app",
         "productName": "Malware Detector",
+        "copyright": "Copyright © 2026 twinklover",
+        "asar": true,
         "directories": {
             "output": "dist"
         },
         "files": [
             "electron/**/*",
-            "app/**/*",
-            "public/**/*",
+            "out/**/*",
             "package.json",
-            "next.config.js",
-            "tailwind.config.js",
-            "tsconfig.json",
-            "postcss.config.js",
-            ".next/**/*",
-            "node_modules/**/*"
+            "next.config.js"
         ],
         "extraResources": [{
                 "from": "backend",
@@ -48,24 +48,16 @@
             }
         ],
         "win": {
-            "target": [{
-                "target": "nsis",
-                "arch": ["x64"]
-            }],
-            "icon": "icon.ico"
+            "target": "nsis",
+            "icon": "public/icon.ico"
         },
         "nsis": {
             "oneClick": false,
             "allowToChangeInstallationDirectory": true,
-            "installerIcon": "icon.ico",
-            "uninstallerIcon": "icon.ico",
             "createDesktopShortcut": true,
             "createStartMenuShortcut": true,
             "shortcutName": "Malware Detector"
-        },
-        "asarUnpack": [
-            "node_modules/**/*"
-        ]
+        }
     },
     "dependencies": {
         "gsap": "^3.14.2",
