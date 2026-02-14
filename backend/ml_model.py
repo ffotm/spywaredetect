@@ -1,31 +1,28 @@
-# ml_model.py
 import pandas as pd
 import numpy as np
 import pickle
 import os
 import gzip
-from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier
-from sklearn.feature_selection import SelectFromModel
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix
+import pefile
 import warnings
 warnings.filterwarnings('ignore')
 
 class PEAnalysisMLModel:
     """
-    Machine Learning model for PE file analysis based on the MalwareData dataset
-    This class handles training, saving, loading, and prediction
+    Machine Learning model for PE file analysis based on MalwareData dataset
+    Optimized for speed and accuracy
     """
 
-    def __init__(self, model_path='pe_malware_model.pkl', selector_path='feature_selector.pkl'):
+    def __init__(self, model_path='pe_malware_model.pkl'):
         self.model = None
-        self.feature_selector = None
         self.feature_names = None
         self.is_trained = False
         self.model_path = model_path
-        self.selector_path = selector_path
         
-        # Feature names from the MalwareData dataset (without Name, md5, legitimate)
+        # Core features from MalwareData dataset
         self.original_feature_names = [
             'Machine', 'SizeOfOptionalHeader', 'Characteristics', 'MajorLinkerVersion',
             'MinorLinkerVersion', 'SizeOfCode', 'SizeOfInitializedData', 'SizeOfUninitializedData',
@@ -43,154 +40,147 @@ class PEAnalysisMLModel:
             'LoadConfigurationSize', 'VersionInformationSize'
         ]
         
-        # Try to load existing model
+        # Most important features based on typical malware characteristics
+        self.important_features = [
+            'SectionsMeanEntropy', 'SectionsMaxEntropy', 'SectionsMinEntropy',
+            'ImportsNbDLL', 'ImportsNb', 'ResourcesMeanEntropy',
+            'SizeOfCode', 'SizeOfImage', 'DllCharacteristics',
+            'AddressOfEntryPoint', 'SectionsNb'
+        ]
+        
         self.load_model()
     
     def load_model(self):
         """Load trained model from disk"""
-        if os.path.exists(self.model_path) and os.path.exists(self.selector_path):
+        if os.path.exists(self.model_path):
             try:
                 with open(self.model_path, 'rb') as f:
-                    self.model = pickle.load(f)
-                with open(self.selector_path, 'rb') as f:
-                    self.feature_selector = pickle.load(f)
+                    model_data = pickle.load(f)
+                    self.model = model_data['model']
+                    self.feature_names = model_data.get('features', self.original_feature_names)
                 self.is_trained = True
-                
-                # Try to load feature names if they exist
-                names_path = self.model_path.replace('.pkl', '_features.pkl')
-                if os.path.exists(names_path):
-                    with open(names_path, 'rb') as f:
-                        self.feature_names = pickle.load(f)
-                
-                print(f"✓ Loaded PE analysis ML model from {self.model_path}")
+                print(f"Loaded PE analysis ML model from {self.model_path}")
                 return True
             except Exception as e:
-                print(f"✗ Error loading ML model: {e}")
+                print(f"Error loading ML model: {e}")
                 return False
         return False
     
     def save_model(self):
         """Save trained model to disk"""
         try:
+            model_data = {
+                'model': self.model,
+                'features': self.feature_names
+            }
             with open(self.model_path, 'wb') as f:
-                pickle.dump(self.model, f)
-            with open(self.selector_path, 'wb') as f:
-                pickle.dump(self.feature_selector, f)
-            if self.feature_names:
-                names_path = self.model_path.replace('.pkl', '_features.pkl')
-                with open(names_path, 'wb') as f:
-                    pickle.dump(self.feature_names, f)
-            print(f"✓ Model saved to {self.model_path}")
+                pickle.dump(model_data, f)
+            print(f"Model saved to {self.model_path}")
             return True
         except Exception as e:
-            print(f"✗ Error saving model: {e}")
+            print(f"Error saving model: {e}")
             return False
     
-    def train(self, csv_path='MalwareData.csv', use_gzipped=True, test_size=0.2, random_state=42):
+    def train(self, csv_path='MalwareData.csv', test_size=0.2, random_state=42):
         """
-        Train the model using the MalwareData dataset
-        
-        Args:
-            csv_path: Path to the CSV file
-            use_gzipped: If True, look for .gz version if regular file doesn't exist
-            test_size: Fraction of data to use for testing
-            random_state: Random seed for reproducibility
-        
-        Returns:
-            Dictionary with training metrics
+        Train the model using MalwareData dataset
+        Dataset format: First 41323 samples are legitimate, rest are malware
         """
         try:
-            # Handle gzipped files
-            if use_gzipped and not os.path.exists(csv_path):
-                gz_path = csv_path + '.gz'
-                if os.path.exists(gz_path):
-                    print(f"📦 Reading compressed dataset from {gz_path}")
-                    with gzip.open(gz_path, 'rt') as f:
-                        df = pd.read_csv(f, sep='|')
-                else:
-                    print(f"✗ Dataset not found at {csv_path} or {gz_path}")
-                    return None
-            else:
-                print(f"📊 Reading dataset from {csv_path}")
+            # Try to load gzipped version first
+            if os.path.exists(csv_path + '.gz'):
+                csv_path = csv_path + '.gz'
+                print(f"Reading compressed dataset from {csv_path}")
+                with gzip.open(csv_path, 'rt') as f:
+                    df = pd.read_csv(f, sep='|')
+            elif os.path.exists(csv_path):
+                print(f"Reading dataset from {csv_path}")
                 df = pd.read_csv(csv_path, sep='|')
+            else:
+                print(f"Dataset not found at {csv_path}")
+                return None
             
-            print(f"✓ Dataset loaded: {df.shape[0]} samples, {df.shape[1]} features")
+            print(f"Dataset loaded: {df.shape[0]} samples, {df.shape[1]} features")
             
-            # Split into legitimate and malware samples for information
-            legit_count = len(df[df['legitimate'] == 1])
-            malware_count = len(df[df['legitimate'] == 0])
-            print(f"   Legitimate: {legit_count}, Malware: {malware_count}")
-            
-            # Prepare features and target
-            # Drop Name, md5, and legitimate columns
-            X = df.drop(['Name', 'md5', 'legitimate'], axis=1).values
+            # Drop non-feature columns
+            X = df.drop(['Name', 'md5', 'legitimate'], axis=1, errors='ignore')
             y = df['legitimate'].values
             
-            # Split data for training and testing
+            # Handle missing values
+            X = X.fillna(0)
+            
+            # Verify feature columns
+            self.feature_names = X.columns.tolist()
+            
+            legit_count = sum(y == 1)
+            malware_count = sum(y == 0)
+            print(f"Legitimate: {legit_count}, Malware: {malware_count}")
+            
+            # Split data
             X_train, X_test, y_train, y_test = train_test_split(
                 X, y, test_size=test_size, random_state=random_state, stratify=y
             )
             
-            print("🔍 Selecting important features...")
-            # Feature selection using ExtraTreesClassifier
-            feat_selector = ExtraTreesClassifier(n_estimators=50, random_state=random_state, n_jobs=-1)
-            feat_selector.fit(X_train, y_train)
-            
-            # Select features with importance > median
-            self.feature_selector = SelectFromModel(feat_selector, prefit=True, threshold='median')
-            X_train_selected = self.feature_selector.transform(X_train)
-            X_test_selected = self.feature_selector.transform(X_test)
-            
-            # Get selected feature names
-            selected_indices = self.feature_selector.get_support(indices=True)
-            self.feature_names = [self.original_feature_names[i] for i in selected_indices]
-            
-            print(f"   Selected {len(self.feature_names)} important features")
-            print(f"   Features: {', '.join(self.feature_names[:10])}...")
-            
-            # Train Random Forest classifier
-            print("🌲 Training Random Forest model...")
+            print("Training Random Forest model...")
+            # Optimized Random Forest parameters
             self.model = RandomForestClassifier(
-                n_estimators=50,
-                max_depth=20,
-                min_samples_split=5,
-                min_samples_leaf=2,
+                n_estimators=100,
+                max_depth=15,
+                min_samples_split=10,
+                min_samples_leaf=5,
+                max_features='sqrt',
                 random_state=random_state,
-                n_jobs=-1
+                n_jobs=-1,
+                class_weight='balanced'  # Handle imbalanced data
             )
-            self.model.fit(X_train_selected, y_train)
             
-            # Evaluate on test set
-            y_pred = self.model.predict(X_test_selected)
-            y_proba = self.model.predict_proba(X_test_selected)
+            self.model.fit(X_train, y_train)
             
-            # Calculate metrics
-            accuracy = self.model.score(X_test_selected, y_test)
+            # Evaluate
+            y_pred = self.model.predict(X_test)
+            y_proba = self.model.predict_proba(X_test)
+            
+            # Metrics
+            accuracy = self.model.score(X_test, y_test)
             cm = confusion_matrix(y_test, y_pred)
-            
-            # Calculate false positive and false negative rates
             tn, fp, fn, tp = cm.ravel()
+            
             fpr = (fp / (fp + tn)) * 100 if (fp + tn) > 0 else 0
             fnr = (fn / (fn + tp)) * 100 if (fn + tp) > 0 else 0
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
             
             metrics = {
                 'accuracy': accuracy * 100,
                 'false_positive_rate': fpr,
                 'false_negative_rate': fnr,
-                'precision': tp / (tp + fp) if (tp + fp) > 0 else 0,
-                'recall': tp / (tp + fn) if (tp + fn) > 0 else 0,
+                'precision': precision,
+                'recall': recall,
+                'f1_score': f1,
                 'confusion_matrix': cm.tolist(),
                 'n_features': len(self.feature_names),
                 'n_train': len(X_train),
                 'n_test': len(X_test)
             }
             
-            print(f"\n✓ Training complete!")
-            print(f"   Accuracy: {metrics['accuracy']:.2f}%")
-            print(f"   False Positive Rate: {metrics['false_positive_rate']:.2f}%")
-            print(f"   False Negative Rate: {metrics['false_negative_rate']:.2f}%")
-            print(f"   Precision: {metrics['precision']:.3f}")
-            print(f"   Recall: {metrics['recall']:.3f}")
+            print(f"\nTraining complete!")
+            print(f"Accuracy: {metrics['accuracy']:.2f}%")
+            print(f"Precision: {metrics['precision']:.3f}")
+            print(f"Recall: {metrics['recall']:.3f}")
+            print(f"F1 Score: {metrics['f1_score']:.3f}")
+            print(f"False Positive Rate: {metrics['false_positive_rate']:.2f}%")
+            print(f"False Negative Rate: {metrics['false_negative_rate']:.2f}%")
+            
+            # Feature importance
+            feature_importance = sorted(
+                zip(self.feature_names, self.model.feature_importances_),
+                key=lambda x: x[1],
+                reverse=True
+            )
+            print("\nTop 10 Important Features:")
+            for feat, importance in feature_importance[:10]:
+                print(f"  {feat}: {importance:.4f}")
             
             self.is_trained = True
             self.save_model()
@@ -198,31 +188,21 @@ class PEAnalysisMLModel:
             return metrics
             
         except Exception as e:
-            print(f"✗ Error training model: {e}")
+            print(f"Error training model: {e}")
             import traceback
             traceback.print_exc()
             return None
     
     def extract_pe_features(self, filepath):
-        """
-        Extract PE features from a file for prediction
-        This matches the features used in the MalwareData dataset
-        
-        Args:
-            filepath: Path to the PE file
-        
-        Returns:
-            numpy array of features or None if extraction fails
-        """
+        """Extract PE features from a file"""
         try:
             pe = pefile.PE(filepath)
             
-            # Initialize feature dictionary with default values
             features = {}
             for name in self.original_feature_names:
                 features[name] = 0
             
-            # Extract basic PE headers
+            # Basic PE headers
             features['Machine'] = pe.FILE_HEADER.Machine
             features['SizeOfOptionalHeader'] = pe.FILE_HEADER.SizeOfOptionalHeader
             features['Characteristics'] = pe.FILE_HEADER.Characteristics
@@ -260,19 +240,16 @@ class PEAnalysisMLModel:
             features['SectionsNb'] = len(sections)
             
             if sections:
-                # Section entropies
                 entropies = [self._calculate_section_entropy(s) for s in sections]
                 features['SectionsMeanEntropy'] = np.mean(entropies)
                 features['SectionsMinEntropy'] = np.min(entropies)
                 features['SectionsMaxEntropy'] = np.max(entropies)
                 
-                # Raw sizes
                 raw_sizes = [s.SizeOfRawData for s in sections]
                 features['SectionsMeanRawsize'] = np.mean(raw_sizes) if raw_sizes else 0
                 features['SectionsMinRawsize'] = np.min(raw_sizes) if raw_sizes else 0
                 features['SectionsMaxRawsize'] = np.max(raw_sizes) if raw_sizes else 0
                 
-                # Virtual sizes
                 virtual_sizes = [s.Misc_VirtualSize for s in sections]
                 features['SectionsMeanVirtualsize'] = np.mean(virtual_sizes) if virtual_sizes else 0
                 features['SectionsMinVirtualsize'] = np.min(virtual_sizes) if virtual_sizes else 0
@@ -301,13 +278,12 @@ class PEAnalysisMLModel:
                 self._count_resources(pe.DIRECTORY_ENTRY_RESOURCE.entries, resources)
                 features['ResourcesNb'] = len(resources)
             
-            # Convert to numpy array in the correct order
-            feature_vector = np.array([features[name] for name in self.original_feature_names])
+            # Convert to array
+            feature_vector = np.array([features[name] for name in self.feature_names])
             
             return feature_vector.reshape(1, -1)
             
         except Exception as e:
-            print(f"Error extracting PE features from {filepath}: {e}")
             return None
     
     def _calculate_section_entropy(self, section):
@@ -317,11 +293,9 @@ class PEAnalysisMLModel:
             if not data:
                 return 0
             
-            # Count byte frequencies
             byte_counts = np.bincount(np.frombuffer(data, dtype=np.uint8))
             byte_counts = byte_counts[byte_counts > 0]
             
-            # Calculate entropy
             probs = byte_counts / len(data)
             entropy = -np.sum(probs * np.log2(probs))
             
@@ -339,49 +313,36 @@ class PEAnalysisMLModel:
     
     def predict(self, filepath):
         """
-        Predict if a file is malware using the trained model
-        
-        Args:
-            filepath: Path to the PE file
-        
-        Returns:
-            tuple: (is_malware, confidence, feature_importance)
+        Predict if a file is malware
+        Returns: (is_malware, confidence, feature_importance)
         """
         if not self.is_trained or self.model is None:
             return False, 0.0, None
         
         try:
-            # Extract features
             features = self.extract_pe_features(filepath)
             if features is None:
                 return False, 0.0, None
             
-            # Apply feature selection
-            features_selected = self.feature_selector.transform(features)
+            prediction = self.model.predict(features)[0]
+            probabilities = self.model.predict_proba(features)[0]
             
-            # Predict
-            prediction = self.model.predict(features_selected)[0]
-            probabilities = self.model.predict_proba(features_selected)[0]
+            # probabilities[0] = legitimate, probabilities[1] = malware
+            # In dataset: 0 = malware, 1 = legitimate
+            is_malware = prediction == 0
+            malware_probability = probabilities[0] if is_malware else (1 - probabilities[1])
             
-            # probabilities[0] = probability of legitimate (class 0)
-            # probabilities[1] = probability of malware (class 1)
-            malware_probability = probabilities[1]
-            is_malware = prediction == 0  # 0 = malware, 1 = legitimate in the dataset
-            
-            # Get feature importance for this prediction
+            feature_importance = None
             if hasattr(self.model, 'feature_importances_'):
                 feature_importance = dict(zip(self.feature_names, self.model.feature_importances_))
-            else:
-                feature_importance = None
             
             return is_malware, malware_probability, feature_importance
             
         except Exception as e:
-            print(f"Error predicting {filepath}: {e}")
             return False, 0.0, None
     
     def get_model_info(self):
-        """Get information about the trained model"""
+        """Get model information"""
         if not self.is_trained:
             return {"status": "not_trained"}
         
@@ -393,43 +354,37 @@ class PEAnalysisMLModel:
         }
 
 
-# ========== Utility function for easy model training ==========
-def train_pe_model(csv_path='MalwareData.csv', use_gzipped=True):
-    """
-    Train the PE analysis model from the command line
-    """
+def train_pe_model(csv_path='MalwareData.csv'):
+    """Train the PE analysis model"""
     print("=" * 60)
-    print("🔬 PE Malware Detection Model Training")
+    print("PE Malware Detection Model Training")
     print("=" * 60)
     
     model = PEAnalysisMLModel()
-    metrics = model.train(csv_path, use_gzipped=use_gzipped)
+    metrics = model.train(csv_path)
     
     if metrics:
         print("\n" + "=" * 60)
-        print("✅ Training Successful!")
+        print("Training Successful!")
         print("=" * 60)
         print(f"Accuracy: {metrics['accuracy']:.2f}%")
-        print(f"False Positive Rate: {metrics['false_positive_rate']:.2f}%")
-        print(f"False Negative Rate: {metrics['false_negative_rate']:.2f}%")
         print(f"Precision: {metrics['precision']:.3f}")
         print(f"Recall: {metrics['recall']:.3f}")
-        print(f"Features used: {metrics['n_features']}")
+        print(f"F1 Score: {metrics['f1_score']:.3f}")
+        print(f"False Positive Rate: {metrics['false_positive_rate']:.2f}%")
+        print(f"False Negative Rate: {metrics['false_negative_rate']:.2f}%")
         print("=" * 60)
     else:
-        print("\n❌ Training failed!")
+        print("\nTraining failed!")
 
 
-# ========== If run directly, train the model ==========
 if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='Train PE Malware Detection Model')
     parser.add_argument('--csv', type=str, default='MalwareData.csv',
-                        help='Path to MalwareData.csv (default: MalwareData.csv)')
-    parser.add_argument('--no-gz', action='store_true',
-                        help='Disable automatic .gz file handling')
+                        help='Path to MalwareData.csv (will auto-detect .gz)')
     
     args = parser.parse_args()
     
-    train_pe_model(args.csv, use_gzipped=not args.no_gz)
+    train_pe_model(args.csv)

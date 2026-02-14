@@ -37,7 +37,7 @@ export default function AntispywareDashboard() {
 
         } catch (err) {
             console.error("Scan error:", err);
-            setError(err.message);
+
         }
     };
 
