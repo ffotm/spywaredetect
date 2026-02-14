@@ -21,6 +21,7 @@ def scan():
     return scan_processes()
 
 
+
 @app.get("/scan/stream")
 def scan_stream():
     """Stream process information in real-time"""

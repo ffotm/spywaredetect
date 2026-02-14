@@ -1,7 +1,6 @@
 'use client'
 import React, { useState, useEffect, useRef } from 'react';
 import { Shield, AlertTriangle, Activity, Search, Clock, Zap, Database } from 'lucide-react';
-import { pid } from 'process';
 
 
 export default function AntispywareDashboard() {
@@ -12,9 +11,9 @@ export default function AntispywareDashboard() {
     const [lastScanTime, setLastScanTime] = useState("Never");
     const [scanProgress, setScanProgress] = useState(0);
     const [error, setError] = useState(null);
-    const [safe, setSafe] = useState(0);
     const [runningProcesses, setRunningProcesses] = useState([]);
-    const [scanLogs, setScanLogs] = useState([]);
+    const [actualProgress, setActualProgress] = useState(0);
+    const [totalToScan, setTotalToScan] = useState(0);
 
 
     const fetchScan = async () => {
@@ -32,7 +31,6 @@ export default function AntispywareDashboard() {
             setThreats(data.alerts || []);
             setTotalProcesses(data.total_processes || 0);
             setSafeCount(data.safe?.length || 0);
-            setRunningProcesses(data.processes || []);
 
             const date = new Date();
             setLastScanTime(date.toLocaleTimeString());
@@ -46,33 +44,32 @@ export default function AntispywareDashboard() {
     const startScan = async () => {
         setIsScanning(true);
         setScanProgress(0);
+        setActualProgress(0);
+        setRunningProcesses([]); // ✅ RESET running processes
+        setTotalToScan(0);
+
+        // Start streaming FIRST to get real progress
         streamScan();
 
+        // Wait a bit for stream to start
+        await new Promise(resolve => setTimeout(resolve, 100));
 
-        // Simulate progress bar
-        const progressInterval = setInterval(() => {
-            setScanProgress(prev => {
-                if (prev >= 90) {
-                    clearInterval(progressInterval);
-                    return 90;
-                }
-                return prev + 10;
-            });
-        }, 200);
-
+        // Then fetch final results
         await fetchScan();
         await databaselog();
 
-        clearInterval(progressInterval);
+        // Ensure progress reaches 100%
         setScanProgress(100);
+        setActualProgress(100);
 
         setTimeout(() => {
             setIsScanning(false);
             setScanProgress(0);
+            setActualProgress(0);
         }, 500);
     };
 
-    // Auto-refresh every 10 seconds when active
+    // Auto-refresh every 10 seconds when not scanning
     useEffect(() => {
         if (isScanning) return;
 
@@ -85,10 +82,17 @@ export default function AntispywareDashboard() {
         try {
             setError(null);
             const source = new EventSource('http://localhost:8000/scan/stream');
+
+            let processCount = 0;
+
             source.onmessage = (e) => {
                 const data = JSON.parse(e.data);
                 console.log("Streaming scan data:", data);
+
                 if (data.status === 'streaming') {
+                    processCount++;
+
+                    // Update running processes list
                     setRunningProcesses(prev => [
                         ...prev,
                         {
@@ -98,18 +102,37 @@ export default function AntispywareDashboard() {
                             memory: data.data.Memory
                         }
                     ]);
-                    setTotalProcesses(prev => prev + 1);
-                }
-                else { source.close(); }
 
+                    // Update progress based on actual count
+                    setActualProgress(processCount);
+
+                    // Estimate total (will be more accurate as we go)
+                    if (processCount <= 10) {
+                        setTotalToScan(200); // Initial estimate
+                    }
+
+                    // Calculate progress percentage (0-90% during scan)
+                    const estimatedTotal = Math.max(processCount * 1.5, 100);
+                    const progress = Math.min((processCount / estimatedTotal) * 90, 90);
+                    setScanProgress(progress);
+
+                } else if (data.status === 'complete') {
+                    console.log(`Stream complete. Total processes: ${processCount}`);
+                    setTotalToScan(processCount);
+                    setScanProgress(90); // Leave room for DB storage
+                    source.close();
+                }
             };
+
             source.onerror = (e) => {
+                console.error("Stream error:", e);
                 source.close();
-            }
+            };
+
         } catch (err) {
             console.error("Streaming scan error:", err);
         }
-    }
+    };
 
     const containerRef = useRef(null);
 
@@ -122,6 +145,8 @@ export default function AntispywareDashboard() {
     const databaselog = async () => {
         try {
             console.log("Storing scan to database...");
+            setScanProgress(95); // Update progress
+
             const response = await fetch('http://localhost:8000/scan/store', {
                 method: 'POST',
             });
@@ -137,12 +162,13 @@ export default function AntispywareDashboard() {
             console.error("❌ Database log error:", err);
             setError(`Failed to store scan: ${err.message}`);
         }
-    }
+    };
 
     const getSeverityColor = (severity) => {
         switch (severity) {
+            case 'confirmed_malware': return 'bg-red-900/30 text-red-400 border-red-500/50';
             case 'critical': return 'bg-red-900/30 text-red-400 border-red-500/50';
-            case 'high': return 'bg-orange-900/30 text-orange-400 border-orange-500/50';
+            case 'warning': return 'bg-orange-900/30 text-orange-400 border-orange-500/50';
             case 'medium': return 'bg-yellow-900/30 text-yellow-400 border-yellow-500/50';
             default: return 'bg-blue-900/30 text-blue-400 border-blue-500/50';
         }
@@ -212,8 +238,10 @@ export default function AntispywareDashboard() {
                 {isScanning && (
                     <div className="bg-gray-900 border border-gray-800 rounded-lg p-6">
                         <div className="flex items-center justify-between mb-3">
-                            <span className="text-sm text-gray-300">Scanning processes...</span>
-                            <span className="text-sm font-mono text-blue-400">{scanProgress}%</span>
+                            <span className="text-sm text-gray-300">
+                                Scanning processes... ({actualProgress} scanned)
+                            </span>
+                            <span className="text-sm font-mono text-blue-400">{Math.round(scanProgress)}%</span>
                         </div>
                         <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
                             <div
@@ -225,8 +253,6 @@ export default function AntispywareDashboard() {
                 )}
 
                 {/* Threats List */}
-
-
                 <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
                     <div className="p-6 border-b border-gray-800">
                         <h2 className="text-xl font-bold flex items-center gap-2">
@@ -235,34 +261,37 @@ export default function AntispywareDashboard() {
                             <span className="ml-auto text-sm text-gray-400">{threats.length} items</span>
                         </h2>
                     </div>
+
+                    {/* Running Processes Stream */}
                     {isScanning && (
                         <div className="p-4 border-b border-gray-800">
                             <h3 className="text-sm text-blue-400 mb-3 flex items-center gap-2">
                                 <Activity className="w-4 h-4 animate-pulse" />
-                                Scanning running processes
+                                Scanning running processes ({runningProcesses.length} found)
                             </h3>
 
-                            <div className="max-h-60 overflow-y-auto space-y-2 font-mono text-sm" ref={containerRef} style={{ height: "100px", overflow: "auto" }}>
-                                {runningProcesses.map((p) => (
+                            <div
+                                className="max-h-60 overflow-y-auto space-y-2 font-mono text-sm"
+                                ref={containerRef}
+                            >
+                                {runningProcesses.map((p, idx) => (
                                     <div
-                                        key={`${p.pid}-${p.name}`}
+                                        key={`process-${p.pid}-${idx}`}
                                         className="flex justify-between bg-gray-800/40 px-3 py-2 rounded"
                                     >
-                                        <span className="truncate w-200">
-
-                                            {p.path || 'Unknown'} (PID {p.pid})
+                                        <span className="truncate flex-1 mr-4">
+                                            {p.name || 'Unknown'} - {p.path || 'N/A'} (PID {p.pid})
                                         </span>
-
-                                        <span className="text-gray-400">
-                                            {p.memory}
+                                        <span className="text-gray-400 flex-shrink-0">
+                                            {p.memory || 'N/A'}
                                         </span>
                                     </div>
                                 ))}
-
                             </div>
                         </div>
                     )}
 
+                    {/* Threats */}
                     <div className="divide-y divide-gray-800">
                         {threats.length === 0 ? (
                             <div className="p-12 text-center">
@@ -271,9 +300,9 @@ export default function AntispywareDashboard() {
                                 <p className="text-sm text-gray-500 mt-2">Click "Scan Now" to check for threats</p>
                             </div>
                         ) : (
-                            threats.map((threat) => (
+                            threats.map((threat, index) => (
                                 <div
-                                    key={threat.id}
+                                    key={`threat-${threat.pid}-${index}`}
                                     className="p-4 hover:bg-gray-800/50 transition-colors"
                                 >
                                     <div className="flex items-start justify-between gap-4">
@@ -311,7 +340,7 @@ export default function AntispywareDashboard() {
 
                 {/* Footer Info */}
                 <div className="text-center text-sm text-gray-500">
-                    Auto-refreshing every 10 seconds • Detection threshold: Score ≥ 2
+                    Auto-refreshing every 10 seconds • Detection threshold: Score ≥ 3.5
                 </div>
             </div>
         </div>
