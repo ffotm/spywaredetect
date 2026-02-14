@@ -1,0 +1,63 @@
+# Node modules
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+python-embedded/
+
+# Build outputs
+dist/
+out/
+.next/
+build/
+
+# Development files
+.git/
+.gitignore
+.env
+.env.local
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Electron
+electron/
+
+# Frontend app (not needed for backend API)
+app/
+public/
+components/
+
+# Documentation
+README.md
+LICENSE
+*.md
+
+# Test files
+tests/
+*.test.js
+*.spec.js
+
+# Large data files (include only what's needed)
+*.csv
+*.json.gz
+# Keep these if needed:
+# !backend/MalwareData.csv.gz
+# !backend/malware_hashes.json
