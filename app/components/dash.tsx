@@ -2,6 +2,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Shield, AlertTriangle, Activity, Search, Clock, Zap, Database } from 'lucide-react';
 
+// Add this type definition at the top of your file
+interface Process {
+    pid: number;
+    name: string;
+    path: string;
+    memory: string;
+    cpu?: number;
+    status?: string;
+}
+
 
 export default function AntispywareDashboard() {
     const [threats, setThreats] = useState([]);
@@ -11,10 +21,22 @@ export default function AntispywareDashboard() {
     const [lastScanTime, setLastScanTime] = useState("Never");
     const [scanProgress, setScanProgress] = useState(0);
     const [error, setError] = useState(null);
-    const [runningProcesses, setRunningProcesses] = useState([]);
+    const [runningProcesses, setRunningProcesses] = useState<Process[]>([]);
     const [actualProgress, setActualProgress] = useState(0);
     const [totalToScan, setTotalToScan] = useState(0);
+    const [backendUrl, setBackendUrl] = useState('http://localhost:8000');
 
+
+    useEffect(() => {
+        if (typeof window !== 'undefined' && window.electron) {
+            window.electron.getBackendUrl().then(url => {
+                setBackendUrl(url);
+                console.log('Backend URL from Electron:', url);
+            }).catch(() => {
+                console.log('Using default backend URL');
+            });
+        }
+    }, []);
 
     const fetchScan = async () => {
         try {
