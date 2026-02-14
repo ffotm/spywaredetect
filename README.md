@@ -180,9 +180,14 @@ Results displayed to user
 
 ## Docker Support
 
+Pull the public image:
+
 ```bash
-docker build -t malware-detector-api .
-docker run -p 8000:8000 malware-detector-api
+docker pull otmanifadia/malware-detector-api:1.0.0
+
+Run:
+docker run -p 8000:8000 otmanifadia/malware-detector-api:1.0.0
+
 ```
 
 With environment variables:
