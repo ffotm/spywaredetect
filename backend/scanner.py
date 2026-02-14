@@ -10,13 +10,10 @@ import hashlib
 import json
 import platform
 import re
-import pydeep
 import pefile
+import tlsh
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
-import pickle
-import tempfile
-import subprocess
+from ml_model import PEAnalysisMLModel
 
 db = Database()
 
@@ -31,48 +28,73 @@ _scan_cache = {
     "cache_duration": 5
 }
 
+# ========== Initialize ML Model ==========
+print(" Initializing PE Analysis ML Model...")
+ml_model = PEAnalysisMLModel()
+if ml_model.is_trained:
+    print("✓ ML Model loaded and ready")
+else:
+    print("⚠ ML Model not trained. Run 'python ml_model.py' to train first.")
+print()
+
 # ========== Multi-hash malware database ==========
 malware_hashes = {
     "sha256": {},
     "md5": {},
     "sha1": {},
     "imphash": {},  # Import hash for PE files
-    "pydeep": {}    # Fuzzy hashes for similarity matching
+    "tlsh": {}      # TLSH fuzzy hashes
 }
 
 # ========== Malware patterns database ==========
 malware_patterns = {
     "wannacry": {
-        "pydeep": [],
-        "imphash": ["e3d4e8a0b5c1f2a3b4c5d6e7f8a9b0c1"],
-        "strings": [b"wcry", b"wncry", b"@WanaDecryptor", b"WNCRY"],
-        "apis": [b"CryptEncrypt", b"InternetOpen", b"CreateService"],
-        "behavior": ["file_encryption", "network_spread"],
-        "entropy_range": (6.5, 7.8)
+        "imphash": [],
+        "strings": [b"wcry", b"wncry", b"@WanaDecryptor", b"WNCRY", b"WANNACRY"],
+        "apis": [b"CryptEncrypt", b"InternetOpen", b"CreateService", b"StartService"],
+        "entropy_range": (6.5, 7.8),
+        "file_size_range": (100000, 5000000),
+        "tlsh_patterns": []
     },
     "emotet": {
-        "pydeep": [],
-        "imphash": ["f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4"],
-        "strings": [b"emotet", b"e-f@!$", b"vmtoolsd"],
-        "apis": [b"URLDownloadToFile", b"CreateProcess", b"GetProcAddress"],
-        "behavior": ["email_spam", "module_download", "process_injection"],
-        "entropy_range": (6.2, 7.5)
+        "imphash": [],
+        "strings": [b"emotet", b"e-f@!$", b"vmtoolsd", b"VBox"],
+        "apis": [b"URLDownloadToFile", b"CreateProcess", b"GetProcAddress", b"VirtualAlloc"],
+        "entropy_range": (6.2, 7.5),
+        "file_size_range": (200000, 2000000),
+        "tlsh_patterns": []
     },
     "cobaltstrike": {
-        "pydeep": [],
-        "imphash": ["a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"],
-        "strings": [b"cobalt strike", b"beacon", b"sleep_mask"],
-        "apis": [b"VirtualAllocEx", b"CreateRemoteThread", b"SetWindowsHookEx"],
-        "behavior": ["c2_communication", "process_injection"],
-        "entropy_range": (6.8, 7.9)
+        "imphash": [],
+        "strings": [b"cobalt strike", b"beacon", b"sleep_mask", b"aggressor"],
+        "apis": [b"VirtualAllocEx", b"CreateRemoteThread", b"SetWindowsHookEx", b"GetModuleHandle"],
+        "entropy_range": (6.8, 7.9),
+        "file_size_range": (50000, 2000000),
+        "tlsh_patterns": []
     },
     "mimikatz": {
-        "pydeep": [],
-        "imphash": ["b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3"],
-        "strings": [b"mimikatz", b"sekurlsa", b"logonpasswords", b"kerberos"],
-        "apis": [b"OpenProcess", b"DuplicateToken", b"ImpersonateLoggedOnUser"],
-        "behavior": ["credential_dumping", "lsass_access"],
-        "entropy_range": (5.8, 7.0)
+        "imphash": [],
+        "strings": [b"mimikatz", b"sekurlsa", b"logonpasswords", b"kerberos", b"lsadump"],
+        "apis": [b"OpenProcess", b"DuplicateToken", b"ImpersonateLoggedOnUser", b"LsaCallAuthenticationPackage"],
+        "entropy_range": (5.8, 7.0),
+        "file_size_range": (100000, 1000000),
+        "tlsh_patterns": []
+    },
+    "lokibot": {
+        "imphash": [],
+        "strings": [b"Loki", b"Bot", b"PASSWORD", b"CREDITCARD"],
+        "apis": [b"InternetReadFile", b"RegQueryValueEx", b"FindFirstFile"],
+        "entropy_range": (6.0, 7.5),
+        "file_size_range": (150000, 800000),
+        "tlsh_patterns": []
+    },
+    "azorult": {
+        "imphash": [],
+        "strings": [b"AZORult", b"Stealer", b"BTC", b"Wallet"],
+        "apis": [b"URLDownloadToFile", b"RegOpenKeyEx", b"CryptAcquireContext"],
+        "entropy_range": (6.3, 7.6),
+        "file_size_range": (100000, 600000),
+        "tlsh_patterns": []
     }
 }
 
@@ -86,18 +108,22 @@ def load_malware_hashes():
                 with open(json_file, 'r') as f:
                     data = json.load(f)
                 
-                data.pop('_metadata', None)
+                # Remove metadata
+                if '_metadata' in data:
+                    metadata = data.pop('_metadata')
+                    print(f"📊 Database metadata: {metadata.get('total_entries', 0)} entries")
+                
                 data.pop('README', None)
                 data.pop('INFO', None)
                 
-                # Build SHA256 index (from your existing file)
+                # Build SHA256 index
                 malware_hashes["sha256"] = data
                 
                 print(f"✓ Loaded {len(data)} SHA256 malware signatures from {json_file}")
                 
                 # Try to load additional hash databases
                 load_imphash_database()
-                load_pydeep_database()
+                load_tlsh_database()
                 
                 return
             except Exception as e:
@@ -112,21 +138,37 @@ def load_imphash_database():
         if os.path.exists(json_file):
             try:
                 with open(json_file, 'r') as f:
-                    malware_hashes["imphash"] = json.load(f)
+                    data = json.load(f)
+                    malware_hashes["imphash"] = data
+                    
+                    # Update pattern database with imphashes
+                    for hash_value, info in data.items():
+                        family = info.get('family', '').lower()
+                        if family in malware_patterns:
+                            malware_patterns[family]['imphash'].append(hash_value)
+                    
                 print(f"✓ Loaded {len(malware_hashes['imphash'])} IMPHASH signatures")
                 break
             except Exception as e:
                 print(f"✗ Error loading {json_file}: {e}")
 
-def load_pydeep_database():
-    """Load pydeep fuzzy hash database"""
-    pydeep_files = ["malware_pydeep.json", "pydeep_db.json"]
-    for json_file in pydeep_files:
+def load_tlsh_database():
+    """Load TLSH fuzzy hash database"""
+    tlsh_files = ["malware_tlsh.json", "tlsh_db.json"]
+    for json_file in tlsh_files:
         if os.path.exists(json_file):
             try:
                 with open(json_file, 'r') as f:
-                    malware_hashes["pydeep"] = json.load(f)
-                print(f"✓ Loaded {len(malware_hashes['pydeep'])} PYDEEP fuzzy signatures")
+                    data = json.load(f)
+                    malware_hashes["tlsh"] = data
+                    
+                    # Update pattern database with TLSH patterns
+                    for hash_value, info in data.items():
+                        family = info.get('family', '').lower()
+                        if family in malware_patterns:
+                            malware_patterns[family]['tlsh_patterns'].append(hash_value)
+                    
+                print(f"✓ Loaded {len(malware_hashes['tlsh'])} TLSH fuzzy signatures")
                 break
             except Exception as e:
                 print(f"✗ Error loading {json_file}: {e}")
@@ -136,64 +178,37 @@ load_malware_hashes()
 # ========== YARA-like signature patterns ==========
 MALWARE_SIGNATURES = {
     "suspicious_strings": [
-        b"keylogger",
-        b"ransomware", 
-        b"cryptolocker",
-        b"mimikatz",
-        b"metasploit",
-        b"cobalt strike",
-        b"empire",
-        b"powershell empire",
-        b"invoke-mimikatz",
-        b"invoke-shellcode",
-        b"get-credential",
-        b"lsadump",
-        b"procdump",
-        b"sekurlsa",
-        b"backdoor",
-        b"rootkit",
-        b"payload",
-        b"exploit",
-        b"shellcode"
+        b"keylogger", b"ransomware", b"cryptolocker", b"mimikatz", b"metasploit",
+        b"cobalt strike", b"empire", b"powershell empire", b"invoke-mimikatz",
+        b"invoke-shellcode", b"get-credential", b"lsadump", b"procdump", b"sekurlsa",
+        b"backdoor", b"rootkit", b"payload", b"exploit", b"shellcode", b"password",
+        b"stealer", b"worm", b"dropper"
     ],
     "packer_signatures": [
-        b"UPX",  # UPX packer
-        b"MPRESS",  # MPRESS packer
-        b"PECompact",
-        b"ASPack",
-        b"Themida",
-        b"VMProtect",
-        b"Enigma"
+        b"UPX", b"MPRESS", b"PECompact", b"ASPack", b"Themida", b"VMProtect", b"Enigma", b"Armadillo"
     ],
     "suspicious_apis": [
-        b"VirtualAllocEx",
-        b"WriteProcessMemory",
-        b"CreateRemoteThread",
-        b"SetWindowsHookEx",
-        b"GetAsyncKeyState",  # Keylogging
-        b"CryptEncrypt",  # Ransomware
-        b"RegSetValueEx",  # Registry modification
-        b"URLDownloadToFile",  # Download capability
-        b"WinExec",
-        b"ShellExecute",
-        b"OpenProcess",
-        b"DuplicateToken",
-        b"ImpersonateLoggedOnUser"
+        b"VirtualAllocEx", b"WriteProcessMemory", b"CreateRemoteThread", b"SetWindowsHookEx",
+        b"GetAsyncKeyState", b"CryptEncrypt", b"RegSetValueEx", b"URLDownloadToFile",
+        b"WinExec", b"ShellExecute", b"OpenProcess", b"DuplicateToken", b"ImpersonateLoggedOnUser",
+        b"CreateProcess", b"InternetOpen", b"InternetReadFile"
     ]
 }
 
 # ========== Suspicious file name patterns ==========
 SUSPICIOUS_FILENAMES = [
-    r".*\.(exe|scr|pif|com|bat|cmd|vbs|js|jar|wsf)\.exe$",  # Double extension
+    r".*\.(exe|scr|pif|com|bat|cmd|vbs|js|jar|wsf)\.exe$",
     r"^(invoice|document|report|photo|video|order|payment|receipt|shipping)\.(exe|scr|pif)$",
     r"^(setup|install|crack|keygen|patch|activator).*\.(exe|scr|pif)$",
     r"^(chrome|firefox|edge|flash|java|adobe).*update.*\.(exe|scr|pif)$",
     r".*codec.*\.(exe|scr|pif)$",
     r".*player.*update.*\.(exe|scr|pif)$",
-    r".*\.(vbs|ps1|bat|cmd)$",  # Script files
+    r".*\.(vbs|ps1|bat|cmd)$",
+    r".*\.(docm|xlsm|pptm)$",
+    r".*password.*\.(exe|scr|pif)$",
+    r".*bank.*\.(exe|scr|pif)$"
 ]
 
-# Compile regex patterns for performance
 SUSPICIOUS_FILENAME_PATTERNS = [re.compile(pattern, re.IGNORECASE) for pattern in SUSPICIOUS_FILENAMES]
 
 # ========== Dynamic trusted paths ==========
@@ -215,12 +230,15 @@ def get_trusted_paths():
         trusted.add(os.path.join(windir, "System32", "csrss.exe").lower())
         trusted.add(os.path.join(windir, "System32", "services.exe").lower())
         trusted.add(os.path.join(windir, "System32", "wininit.exe").lower())
+        trusted.add(os.path.join(windir, "System32", "taskhostw.exe").lower())
         
         # Common legitimate apps
         common_apps = [
             os.path.join(progfiles, "Google", "Chrome", "Application", "chrome.exe"),
             os.path.join(progfiles_x86, "Microsoft", "Edge", "Application", "msedge.exe"),
             os.path.join(appdata, "Programs", "Microsoft VS Code", "Code.exe"),
+            os.path.join(progfiles, "Microsoft Office", "root", "Office16", "WINWORD.EXE"),
+            os.path.join(progfiles, "Microsoft Office", "root", "Office16", "EXCEL.EXE"),
         ]
         
         for app in common_apps:
@@ -229,7 +247,8 @@ def get_trusted_paths():
     
     elif system == "Linux":
         trusted.update([
-            "/usr/bin/systemd", "/usr/bin/bash", "/usr/bin/python3"
+            "/usr/bin/systemd", "/usr/bin/bash", "/usr/bin/python3",
+            "/usr/bin/gnome-shell", "/usr/bin/Xorg"
         ])
     
     return trusted
@@ -238,21 +257,11 @@ trusted_processes_paths = get_trusted_paths()
 
 # ========== Whitelisted patterns ==========
 WHITELISTED_PATTERNS = [
-    r'C:\\Windows\\System32',
-    r'C:\\Windows\\SystemApps',
-    r'C:\\Windows\\ImmersiveControlPanel',
-    r'C:\\Program Files\\WindowsApps',
-    r'C:\\Program Files\\Microsoft OneDrive',
-    r'C:\\Program Files\\CONEXANT',
-    r'C:\\Program Files\\Synaptics',
-    r'Microsoft VS Code',
-    r'\\Git\\',
-    r'\\nodejs\\',
-    r'\\Python\\',
-    r'\\.vscode\\extensions',
-    r'SpotifyAB\\.SpotifyMusic',
-    r'Opera GX',
-    r'WOMic',
+    r'C:\\Windows\\System32', r'C:\\Windows\\SystemApps', r'C:\\Windows\\ImmersiveControlPanel',
+    r'C:\\Program Files\\WindowsApps', r'C:\\Program Files\\Microsoft OneDrive',
+    r'C:\\Program Files\\CONEXANT', r'C:\\Program Files\\Synaptics', r'Microsoft VS Code',
+    r'\\Git\\', r'\\nodejs\\', r'\\Python\\', r'\\.vscode\\extensions',
+    r'SpotifyAB\\.SpotifyMusic', r'Opera GX', r'WOMic', r'Discord', r'Slack', r'Teams'
 ]
 
 WHITELISTED_REGEX = [re.compile(pattern, re.IGNORECASE) for pattern in WHITELISTED_PATTERNS]
@@ -272,169 +281,57 @@ TRUSTED_PROCESS_NAMES = {
     'searchhost.exe', 'startmenuexperiencehost.exe', 'shellexperiencehost.exe',
     'textinputhost.exe', 'lockapp.exe', 'widgetservice.exe', 'widgets.exe',
     'useroobebroker.exe', 'phoneexperiencehost.exe', 'crossdeviceservice.exe',
-    'video.ui.exe', 'snippingtool.exe', 'systemsettings.exe',
-    'igfxem.exe', 'syntpenh.exe', 'flow.exe', 'onedrive.sync.service.exe',
-    'explorer.exe', 'code.exe', 'node.exe', 'python.exe', 'bash.exe',
-    'spotify.exe', 'opera_crashreporter.exe', 'codesetup-stable*.exe',
-    'codesetup-stable*.tmp', 'devsense.php.ls.exe'
+    'video.ui.exe', 'snippingtool.exe', 'systemsettings.exe', 'igfxem.exe',
+    'syntpenh.exe', 'flow.exe', 'onedrive.sync.service.exe', 'explorer.exe',
+    'code.exe', 'node.exe', 'python.exe', 'bash.exe', 'spotify.exe',
+    'opera_crashreporter.exe', 'discord.exe', 'slack.exe', 'teams.exe',
+    'winword.exe', 'excel.exe', 'powerpnt.exe', 'outlook.exe'
 }
 
-# ========== ML Detection Class ==========
-class MLMalwareDetector:
-    def __init__(self, model_path='malware_model.pkl'):
-        self.model = None
-        self.feature_names = [
-            'file_size', 'entropy', 'sections_count', 'suspicious_strings',
-            'suspicious_apis', 'packed', 'has_imports', 'has_exports',
-            'is_dll', 'is_driver', 'timestamp', 'machine_type'
-        ]
-        
-        if os.path.exists(model_path):
-            try:
-                with open(model_path, 'rb') as f:
-                    self.model = pickle.load(f)
-                print(f"✓ Loaded ML model from {model_path}")
-            except Exception as e:
-                print(f"✗ Error loading ML model: {e}")
+def is_trusted_process(name, path):
+    """Check if process is trusted by name or path"""
+    if not name:
+        return False
     
-    def extract_features(self, filepath):
-        """Extract features for ML detection"""
-        features = []
-        
-        try:
-            # File size (normalized)
-            file_size = os.path.getsize(filepath)
-            features.append(min(file_size / (10 * 1024 * 1024), 1.0))  # Cap at 10MB
-            
-            # Entropy
-            entropy = calculate_entropy(filepath)
-            features.append(entropy / 8.0)  # Normalize to 0-1
-            
-            # PE file analysis
-            try:
-                pe = pefile.PE(filepath)
-                
-                # Number of sections (normalized)
-                sections_count = len(pe.sections)
-                features.append(min(sections_count / 20, 1.0))  # Cap at 20 sections
-                
-                # Check if packed (high entropy sections)
-                packed = 0
-                for section in pe.sections:
-                    section_entropy = calculate_entropy_for_bytes(section.get_data()[:1024])
-                    if section_entropy > 7.0:
-                        packed = 1
-                        break
-                features.append(packed)
-                
-                # Has imports
-                has_imports = 1 if hasattr(pe, 'DIRECTORY_ENTRY_IMPORT') else 0
-                features.append(has_imports)
-                
-                # Has exports
-                has_exports = 1 if hasattr(pe, 'DIRECTORY_ENTRY_EXPORT') else 0
-                features.append(has_exports)
-                
-                # Is DLL
-                is_dll = 1 if (pe.FILE_HEADER.Characteristics & 0x2000) else 0
-                features.append(is_dll)
-                
-                # Is driver
-                is_driver = 1 if pe.FILE_HEADER.Machine == 0x1c0 else 0  # IMAGE_FILE_MACHINE_AMD64
-                features.append(is_driver)
-                
-                # Timestamp (might indicate age)
-                timestamp = pe.FILE_HEADER.TimeDateStamp
-                year = 1970 + timestamp // (365 * 24 * 3600)
-                features.append(min(max(0, (year - 2000) / 20), 1.0))  # Normalize year
-                
-                # Machine type
-                machine_type = pe.FILE_HEADER.Machine / 0x8664  # Normalize by AMD64 value
-                features.append(min(machine_type, 1.0))
-                
-            except:
-                # Not a PE file or can't parse
-                features.extend([0, 0, 0, 0, 0, 0, 0, 0])
-            
-            # String analysis
-            suspicious_string_count = 0
-            api_count = 0
-            
-            try:
-                with open(filepath, 'rb') as f:
-                    content = f.read(1024 * 1024)  # First 1MB
-                    
-                    # Count suspicious strings
-                    for sus_string in MALWARE_SIGNATURES["suspicious_strings"]:
-                        if sus_string in content:
-                            suspicious_string_count += 1
-                    
-                    # Count suspicious APIs
-                    for api in MALWARE_SIGNATURES["suspicious_apis"]:
-                        if api in content:
-                            api_count += 1
-            except:
-                pass
-            
-            features.append(min(suspicious_string_count / 10, 1.0))
-            features.append(min(api_count / 10, 1.0))
-            
-            # Ensure we have exactly the right number of features
-            while len(features) < len(self.feature_names):
-                features.append(0)
-            features = features[:len(self.feature_names)]
-            
-        except Exception as e:
-            print(f"Error extracting features from {filepath}: {e}")
-            features = [0] * len(self.feature_names)
-        
-        return np.array(features).reshape(1, -1)
+    name_lower = name.lower()
     
-    def predict(self, filepath):
-        """Predict if file is malware using ML model"""
-        if not self.model:
-            return False, 0.0, []
-        
-        try:
-            features = self.extract_features(filepath)
-            
-            if hasattr(self.model, 'predict_proba'):
-                proba = self.model.predict_proba(features)[0][1]
-                prediction = proba > 0.7
-            else:
-                prediction = self.model.predict(features)[0]
-                proba = 0.5 if prediction else 0.0
-            
-            return prediction, proba, self.feature_names
-        except Exception as e:
-            print(f"Error in ML prediction: {e}")
-            return False, 0.0, []
+    if name_lower in TRUSTED_PROCESS_NAMES:
+        return True
+    
+    if any(pattern in name_lower for pattern in ['codesetup', 'vscode', 'spotify', 'opera']):
+        return True
+    
+    return is_whitelisted_path(path)
 
-# Initialize ML detector
-ml_detector = MLMalwareDetector()
-
-def calculate_pydeep_hash(filepath):
-    """Calculate fuzzy hash for similarity matching"""
+# ========== TLSH Fuzzy Hashing Functions ==========
+def calculate_tlsh_hash(filepath):
+    """Calculate TLSH fuzzy hash for similarity matching"""
     try:
         with open(filepath, 'rb') as f:
             data = f.read()
-        return pydeep.hash(data)
+        
+        if len(data) < 50:
+            return None
+            
+        return tlsh.hash(data)
     except Exception as e:
         return None
 
-def check_pydeep_similarity(filepath):
-    """Check if file is similar to known malware using pydeep"""
-    file_hash = calculate_pydeep_hash(filepath)
+def check_tlsh_similarity(filepath):
+    """Check if file is similar to known malware using TLSH"""
+    file_hash = calculate_tlsh_hash(filepath)
     if not file_hash:
         return False, None, 0
     
     best_match = None
     best_similarity = 0
     
-    # Check against known pydeep hashes
-    for known_hash, malware_info in malware_hashes.get("pydeep", {}).items():
+    # Check against known TLSH hashes
+    for known_hash, malware_info in malware_hashes.get("tlsh", {}).items():
         try:
-            similarity = pydeep.compare(file_hash, known_hash)
+            diff = tlsh.diff(file_hash, known_hash)
+            similarity = max(0, 100 - (diff / 10))
+            
             if similarity > best_similarity:
                 best_similarity = similarity
                 best_match = malware_info
@@ -443,17 +340,20 @@ def check_pydeep_similarity(filepath):
     
     # Check against pattern database
     for malware_name, pattern in malware_patterns.items():
-        for known_hash in pattern.get("pydeep", []):
+        for pattern_hash in pattern.get("tlsh_patterns", []):
             try:
-                similarity = pydeep.compare(file_hash, known_hash)
+                diff = tlsh.diff(file_hash, pattern_hash)
+                similarity = max(0, 100 - (diff / 10))
                 if similarity > best_similarity:
                     best_similarity = similarity
                     best_match = {"name": malware_name, "family": malware_name}
             except:
                 continue
     
-    if best_similarity > 70:  # 70% similarity threshold
+    if best_similarity > 70:
         return True, best_match, best_similarity
+    elif best_similarity > 50:
+        return "possible", best_match, best_similarity
     
     return False, None, best_similarity
 
@@ -471,11 +371,9 @@ def check_imphash(filepath):
     if not imphash:
         return False, None
     
-    # Check against known imphashes
     if imphash in malware_hashes.get("imphash", {}):
         return True, malware_hashes["imphash"][imphash]
     
-    # Check against pattern database
     for malware_name, pattern in malware_patterns.items():
         if imphash in pattern.get("imphash", []):
             return True, {"name": malware_name, "family": malware_name}
@@ -487,89 +385,87 @@ def check_pattern_match(filepath, file_content=None):
     if file_content is None:
         try:
             with open(filepath, 'rb') as f:
-                file_content = f.read(1024 * 1024)  # First 1MB
+                file_content = f.read(1024 * 1024)
         except:
             return False, None, 0
     
     entropy = calculate_entropy(filepath)
+    file_size = os.path.getsize(filepath)
     best_match = None
     best_score = 0
     
     for malware_name, pattern in malware_patterns.items():
         score = 0
         
-        # Check strings
+        # Check strings (40% weight)
         for string in pattern.get("strings", []):
             if string in file_content:
-                score += 20
+                score += 40
                 break
         
-        # Check APIs
+        # Check APIs (30% weight)
+        api_matches = 0
         for api in pattern.get("apis", []):
             if api in file_content:
-                score += 15
-                break
+                api_matches += 1
+        if api_matches >= 3:
+            score += 30
+        elif api_matches >= 1:
+            score += 15
         
-        # Check entropy range
+        # Check entropy range (20% weight)
         entropy_range = pattern.get("entropy_range")
         if entropy_range and entropy_range[0] <= entropy <= entropy_range[1]:
+            score += 20
+        
+        # Check file size range (10% weight)
+        size_range = pattern.get("file_size_range")
+        if size_range and size_range[0] <= file_size <= size_range[1]:
             score += 10
         
         if score > best_score:
             best_score = score
             best_match = malware_name
     
-    if best_score >= 30:
+    if best_score >= 50:
         return True, best_match, best_score
+    elif best_score >= 30:
+        return "possible", best_match, best_score
     
     return False, None, best_score
 
-def calculate_entropy_for_bytes(data):
-    """Calculate entropy for a bytes object"""
-    if not data:
-        return 0
-    
-    byte_counts = [0] * 256
-    for byte in data:
-        byte_counts[byte] += 1
-    
-    entropy = 0
-    data_len = len(data)
-    for count in byte_counts:
-        if count > 0:
+def calculate_entropy(filepath, sample_size=65536):
+    """Calculate Shannon entropy of file"""
+    try:
+        with open(filepath, 'rb') as f:
+            data = f.read(sample_size)
+        
+        if not data:
+            return 0
+        
+        from collections import Counter
+        import math
+        
+        counter = Counter(data)
+        entropy = 0
+        data_len = len(data)
+        
+        for count in counter.values():
             freq = count / data_len
-            entropy -= freq * (freq.bit_length() - 1)
-    
-    return entropy
+            entropy -= freq * math.log2(freq)
+        
+        return entropy
+    except:
+        return 0
 
-def is_trusted_process(name, path):
-    """Check if process is trusted by name or path"""
-    if not name:
-        return False
-    
-    name_lower = name.lower()
-    
-    if name_lower in TRUSTED_PROCESS_NAMES:
-        return True
-    
-    if any(pattern in name_lower for pattern in ['codesetup', 'vscode', 'spotify', 'opera']):
-        return True
-    
-    return is_whitelisted_path(path)
-
-# ========== Multi-hash calculation ==========
 def calculate_file_hashes(filepath, max_size=50*1024*1024):
-    """
-    Calculate multiple hashes of a file for comprehensive detection
-    Returns: dict with sha256, md5, sha1, and file size
-    """
+    """Calculate multiple hashes of a file"""
     if not filepath or not os.path.isfile(filepath):
         return None
     
     try:
         file_size = os.path.getsize(filepath)
         
-        # Skip very large files for performance
         if file_size > max_size:
             return {"size": file_size, "too_large": True}
         
@@ -578,7 +474,6 @@ def calculate_file_hashes(filepath, max_size=50*1024*1024):
         sha1_obj = hashlib.sha1()
         
         with open(filepath, 'rb') as f:
-            # Read file in chunks
             while chunk := f.read(8192):
                 sha256_obj.update(chunk)
                 md5_obj.update(chunk)
@@ -594,27 +489,19 @@ def calculate_file_hashes(filepath, max_size=50*1024*1024):
         print(f"Error hashing {filepath}: {e}")
         return None
 
-# ========== Enhanced malware detection ==========
 def check_malware_comprehensive(filepath):
     """
-    Comprehensive malware check using:
-    1. Multi-hash comparison (SHA256, MD5, SHA1)
-    2. Fuzzy hash matching (PyDeep)
-    3. Import hash matching (IMPHASH)
-    4. Pattern-based detection
-    5. Machine learning detection
-    6. File signature scanning
-    7. Suspicious filename patterns
-    8. File entropy analysis
-    
-    Returns: (is_malware, detection_info, file_hashes)
+    Comprehensive malware check using multiple detection methods including ML
     """
     detection_info = {
         "hash_match": False,
         "fuzzy_match": False,
+        "fuzzy_similarity": 0,
         "imphash_match": False,
         "pattern_match": False,
+        "pattern_confidence": 0,
         "ml_match": False,
+        "ml_confidence": 0,
         "signature_match": False,
         "suspicious_name": False,
         "high_entropy": False,
@@ -623,7 +510,6 @@ def check_malware_comprehensive(filepath):
         "matched_family": None
     }
     
-    # Get file hashes
     hashes = calculate_file_hashes(filepath)
     if not hashes or hashes.get("too_large"):
         return False, detection_info, hashes
@@ -631,106 +517,123 @@ def check_malware_comprehensive(filepath):
     confidence = 0
     file_content = None
     
-    # 1. CHECK MULTIPLE HASH TYPES (Easiest to bypass)
+    # 1. EXACT HASH MATCH
     for hash_type in ["sha256", "md5", "sha1"]:
         hash_value = hashes.get(hash_type)
         if hash_value and hash_value in malware_hashes.get(hash_type, {}):
             detection_info["hash_match"] = True
             malware_data = malware_hashes[hash_type][hash_value]
-            detection_info["details"].append(f"Exact hash match ({hash_type.upper()}): {malware_data.get('name', 'Unknown')}")
-            detection_info["matched_family"] = malware_data.get('family', 'Unknown')
+            name = malware_data.get('name', 'Unknown')
+            family = malware_data.get('family', name)
+            detection_info["details"].append(f"🚨 EXACT HASH MATCH: {name}")
+            detection_info["matched_family"] = family
             confidence += 100
-            # Still return, but note this is easy to bypass
     
-    # 2. PYDEEP FUZZY HASH (Harder to bypass)
-    pydeep_match, pydeep_info, pydeep_similarity = check_pydeep_similarity(filepath)
-    if pydeep_match:
+    # 2. TLSH FUZZY HASH
+    tlsh_result, tlsh_info, tlsh_similarity = check_tlsh_similarity(filepath)
+    if tlsh_result == True:
         detection_info["fuzzy_match"] = True
-        detection_info["details"].append(f"Fuzzy hash match: {pydeep_similarity}% similar to {pydeep_info.get('name', 'Unknown')}")
-        detection_info["matched_family"] = pydeep_info.get('family', pydeep_info.get('name'))
-        confidence += pydeep_similarity
+        detection_info["fuzzy_similarity"] = tlsh_similarity
+        name = tlsh_info.get('name', 'Unknown') if tlsh_info else 'Unknown'
+        family = tlsh_info.get('family', name) if tlsh_info else 'Unknown'
+        detection_info["details"].append(f"🎯 TLSH FUZZY MATCH: {tlsh_similarity:.1f}% similar to {name}")
+        detection_info["matched_family"] = family
+        confidence += tlsh_similarity
+    elif tlsh_result == "possible":
+        detection_info["details"].append(f"🔍 Possible TLSH match: {tlsh_similarity:.1f}% similarity")
+        confidence += tlsh_similarity * 0.5
     
-    # 3. IMPORT HASH (Hard to bypass for PE files)
+    # 3. IMPORT HASH
     imphash_match, imphash_info = check_imphash(filepath)
     if imphash_match:
         detection_info["imphash_match"] = True
-        detection_info["details"].append(f"Import hash matches {imphash_info.get('name', 'Unknown')}")
-        detection_info["matched_family"] = imphash_info.get('family', imphash_info.get('name'))
+        name = imphash_info.get('name', 'Unknown')
+        family = imphash_info.get('family', name)
+        detection_info["details"].append(f"📦 IMPORT HASH MATCH: {name}")
+        detection_info["matched_family"] = family
         confidence += 85
     
-    # Read file content for other checks
+    # Read file content
     try:
         with open(filepath, 'rb') as f:
-            file_content = f.read(1024 * 1024)  # First 1MB
+            file_content = f.read(1024 * 1024)
     except:
         file_content = None
     
-    # 4. PATTERN-BASED DETECTION
+    # 4. PATTERN MATCH
     pattern_match, pattern_name, pattern_score = check_pattern_match(filepath, file_content)
-    if pattern_match:
+    if pattern_match == True:
         detection_info["pattern_match"] = True
-        detection_info["details"].append(f"Pattern match: {pattern_name} (score: {pattern_score})")
+        detection_info["pattern_confidence"] = pattern_score
+        detection_info["details"].append(f"📊 PATTERN MATCH: {pattern_name} ({pattern_score}%)")
         detection_info["matched_family"] = pattern_name
         confidence += pattern_score
+    elif pattern_match == "possible":
+        detection_info["details"].append(f"📊 Possible pattern match: {pattern_name} ({pattern_score}%)")
+        confidence += pattern_score * 0.5
     
     # 5. MACHINE LEARNING DETECTION
-    ml_match, ml_confidence, ml_features = ml_detector.predict(filepath)
-    if ml_match:
-        detection_info["ml_match"] = True
-        detection_info["details"].append(f"ML detection confidence: {ml_confidence:.2%}")
-        confidence += ml_confidence * 100
+    if ml_model.is_trained:
+        ml_match, ml_confidence, _ = ml_model.predict(filepath)
+        if ml_match:
+            detection_info["ml_match"] = True
+            detection_info["ml_confidence"] = ml_confidence
+            detection_info["details"].append(f"🤖 ML DETECTION: {ml_confidence:.1%} confidence")
+            confidence += ml_confidence * 100
     
-    # 6. CHECK SUSPICIOUS FILENAME PATTERNS
+    # 6. SUSPICIOUS FILENAME
     filename = os.path.basename(filepath)
     for pattern in SUSPICIOUS_FILENAME_PATTERNS:
         if pattern.match(filename):
             detection_info["suspicious_name"] = True
-            detection_info["details"].append(f"Suspicious filename pattern: {filename}")
+            detection_info["details"].append(f"📁 Suspicious filename: {filename}")
             confidence += 20
             break
     
-    # 7. SCAN FILE FOR MALICIOUS SIGNATURES
+    # 7. SIGNATURE SCANNING
     if file_content:
-        # Check for suspicious strings
         for sus_string in MALWARE_SIGNATURES["suspicious_strings"]:
             if sus_string in file_content:
                 detection_info["signature_match"] = True
-                detection_info["details"].append(f"Malicious string found: {sus_string.decode('utf-8', errors='ignore')}")
+                detection_info["details"].append(f"🔤 Malicious string: {sus_string.decode('utf-8', errors='ignore')}")
                 confidence += 30
                 break
         
-        # Check for packer signatures
+        packers_found = []
         for packer in MALWARE_SIGNATURES["packer_signatures"]:
             if packer in file_content:
-                detection_info["details"].append(f"Packed executable detected: {packer.decode('utf-8', errors='ignore')}")
-                confidence += 15
+                packers_found.append(packer.decode('utf-8', errors='ignore'))
+        if packers_found:
+            detection_info["details"].append(f"📦 Packed with: {', '.join(packers_found)}")
+            confidence += 15 * len(packers_found)
         
-        # Check for suspicious APIs
-        suspicious_api_count = 0
+        suspicious_apis_found = []
         for api in MALWARE_SIGNATURES["suspicious_apis"]:
             if api in file_content:
-                suspicious_api_count += 1
+                suspicious_apis_found.append(api.decode('utf-8', errors='ignore'))
         
-        if suspicious_api_count >= 3:
+        if len(suspicious_apis_found) >= 3:
             detection_info["signature_match"] = True
-            detection_info["details"].append(f"Multiple suspicious APIs found ({suspicious_api_count})")
+            detection_info["details"].append(f"🔧 Multiple suspicious APIs ({len(suspicious_apis_found)} found)")
             confidence += 25
+        elif suspicious_apis_found:
+            detection_info["details"].append(f"🔧 Suspicious APIs: {', '.join(suspicious_apis_found[:3])}")
+            confidence += 10
     
-    # 8. CALCULATE ENTROPY
+    # 8. ENTROPY
     try:
         entropy = calculate_entropy(filepath)
         if entropy > 7.0:
             detection_info["high_entropy"] = True
-            detection_info["details"].append(f"High entropy ({entropy:.2f}) - possibly packed/encrypted")
+            detection_info["details"].append(f"🎲 High entropy ({entropy:.2f}) - possibly packed")
             confidence += 15
         elif entropy < 4.0:
-            detection_info["details"].append(f"Low entropy ({entropy:.2f}) - possibly simple script")
+            detection_info["details"].append(f"📝 Low entropy ({entropy:.2f}) - possibly script")
     except:
         pass
     
     detection_info["confidence"] = min(confidence, 100)
     
-    # Determine if malicious based on multiple indicators
     is_malware = (
         detection_info["hash_match"] or
         detection_info["fuzzy_match"] or
@@ -739,23 +642,10 @@ def check_malware_comprehensive(filepath):
         detection_info["ml_match"] or
         (detection_info["signature_match"] and detection_info["high_entropy"]) or
         (detection_info["suspicious_name"] and detection_info["signature_match"]) or
-        confidence >= 50
+        confidence >= 60
     )
     
     return is_malware, detection_info, hashes
-
-def calculate_entropy(filepath, sample_size=65536):
-    """Calculate Shannon entropy of file (0-8, higher = more random/encrypted)"""
-    try:
-        with open(filepath, 'rb') as f:
-            data = f.read(sample_size)
-        
-        if not data:
-            return 0
-        
-        return calculate_entropy_for_bytes(data)
-    except:
-        return 0
 
 # ========== File monitoring ==========
 class FileEventHandler(FileSystemEventHandler):
@@ -777,7 +667,8 @@ def start_file_monitoring():
         os.path.expanduser("~/Documents"), 
         os.path.expanduser("~/Downloads"), 
         os.path.expanduser("~/Desktop"),
-        os.path.expanduser("~/AppData/Local/Temp")  # Monitor temp folder
+        os.path.expanduser("~/AppData/Local/Temp"),
+        os.path.expanduser("~/AppData/Roaming"),
     ] 
     for path in path_to_monitor:
         if os.path.exists(path):
@@ -786,7 +677,6 @@ def start_file_monitoring():
     observer.start()
     return observer
 
-# ========== Helper functions ==========
 def get_dir(path):
     if not path:
         return None
@@ -796,7 +686,6 @@ def get_dir(path):
     return "/".join(parts[:-1])
 
 def get_process_from_path(path):
-    """Optimized: with timeout"""
     for p in psutil.process_iter(['pid', 'name']):
         try:
             for f in p.open_files():
@@ -806,11 +695,8 @@ def get_process_from_path(path):
             continue
     return None
 
-# ========== Main scanning logic (ENHANCED) ==========
 def scan_processes(force_refresh=False):
-    """
-    Enhanced scan with multi-hash detection and signature scanning
-    """
+    """Main scanning function"""
     global _scan_cache, file_activity_by_pid, file_activity_global
     
     current_time = time.time()
@@ -820,7 +706,7 @@ def scan_processes(force_refresh=False):
             print(f"⚡ Using cached scan results ({time_since_last:.1f}s old)")
             return _scan_cache["last_result"]
     
-    print("🔍 Starting enhanced multi-layer scan with AI detection...")
+    print("🔍 Starting enhanced multi-layer AI scan...")
     
     with lock:
         file_activity_by_pid_snapshot = dict(file_activity_by_pid)
@@ -832,7 +718,6 @@ def scan_processes(force_refresh=False):
     process_objects = {}
     all_processes_count = 0
     
-    # Batch CPU warmup
     print("   Warming up CPU measurements...")
     procs_to_monitor = []
     for p in psutil.process_iter(['pid', 'name', 'exe']):
@@ -861,7 +746,6 @@ def scan_processes(force_refresh=False):
     
     time.sleep(0.3)
 
-    # Collect process info
     print(f"   Collecting data from {len(procs_to_monitor)} processes...")
     count = 0
     
@@ -897,7 +781,6 @@ def scan_processes(force_refresh=False):
             
     print(f"✓ Collected {len(processes)} processes after filtering (Total: {all_processes_count})")
     
-    # Calculate directory frequency
     dirs = []
     for p in processes:
         d = get_dir(p.get("exe"))
@@ -919,11 +802,10 @@ def scan_processes(force_refresh=False):
     safe = []
     seen_pids = set()
 
-    print("   Analyzing processes with multi-layer AI detection...")
+    print("   Analyzing processes with multi-layer detection...")
     for idx, p in enumerate(processes):
         score = 0
         reasons = []
-        malware_info = None
         detection_details = []
         file_hashes = None
         detection_confidence = 0
@@ -935,7 +817,6 @@ def scan_processes(force_refresh=False):
         if is_trusted_process(name, exe_path):
             continue
 
-        # ===== ENHANCED MALWARE DETECTION =====
         is_malware, detection_info, file_hashes = check_malware_comprehensive(exe_path)
         
         if is_malware:
@@ -944,29 +825,27 @@ def scan_processes(force_refresh=False):
             if detection_info["hash_match"]:
                 score += 10
                 reasons.append("confirmed_malware_hash")
-            elif detection_info["fuzzy_match"]:
+            if detection_info["fuzzy_match"]:
                 score += 8
-                reasons.append("fuzzy_hash_match")
-            elif detection_info["imphash_match"]:
+                reasons.append(f"fuzzy_match_{detection_info['fuzzy_similarity']:.0f}pct")
+            if detection_info["imphash_match"]:
                 score += 7
                 reasons.append("import_hash_match")
-            elif detection_info["pattern_match"]:
+            if detection_info["pattern_match"]:
                 score += 6
-                reasons.append("malware_pattern_match")
-            elif detection_info["ml_match"]:
+                reasons.append("malware_pattern")
+            if detection_info["ml_match"]:
                 score += 5
                 reasons.append("ml_detection")
-            elif detection_info["signature_match"]:
+            if detection_info["signature_match"]:
                 score += 4
                 reasons.append("malicious_signatures")
-            
             if detection_info["suspicious_name"]:
                 score += 2
                 reasons.append("suspicious_filename")
-            
             if detection_info["high_entropy"]:
                 score += 1
-                reasons.append("high_entropy_packed")
+                reasons.append("high_entropy")
             
             detection_details = detection_info["details"]
             
@@ -974,13 +853,12 @@ def scan_processes(force_refresh=False):
                 print(f"🚨 THREAT DETECTED: {name} - {detection_info['matched_family']} family (confidence: {detection_confidence}%)")
                 reasons.append(f"family:{detection_info['matched_family']}")
             else:
-                print(f"🚨 THREAT DETECTED: {name} - {', '.join(detection_details[:2])}")
+                print(f"🚨 THREAT DETECTED: {name} - Confidence: {detection_confidence}%")
 
-        # ===== BEHAVIORAL CHECKS =====
-        
+        # Behavioral checks
         if is_rare_path(exe_path):
             score += 0.5
-            reasons.append("rare_execution_path")
+            reasons.append("rare_path")
 
         cpu = p.get("cpu_percent", 0)
         if cpu and cpu > 50:
@@ -997,27 +875,27 @@ def scan_processes(force_refresh=False):
             score += 1
             reasons.append("high_threads")
         
-        # Check connections only for suspicious processes
         if score >= 1:
             try:
                 connections = len(proc_obj.net_connections()) if proc_obj else 0
                 if connections > 100:
                     score += 1
                     reasons.append("high_connections")
+                elif connections > 10:
+                    score += 0.5
+                    reasons.append("many_connections")
             except:
                 pass
         
-        # Hidden executable
         if exe_path and os.path.isfile(exe_path):
             try:
                 attrs = os.stat(exe_path).st_file_attributes
                 if attrs & 0x2:
                     score += 2
-                    reasons.append("hidden_executable")
+                    reasons.append("hidden_file")
             except AttributeError:
                 pass
         
-        # Rapid child creation
         if proc_obj and score >= 1:
             try:
                 children = proc_obj.children()
@@ -1025,28 +903,33 @@ def scan_processes(force_refresh=False):
                 if len(recent_children) > 15:
                     score += 1
                     reasons.append("rapid_child_creation")
+                elif len(recent_children) > 5:
+                    score += 0.5
+                    reasons.append("many_children")
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 pass
         
-        # Suspicious children
         if proc_obj and score >= 1:
             try:
                 for c in proc_obj.children():
                     if c.name().lower() in ["cmd.exe", "powershell.exe", "wscript.exe", "cscript.exe"]:
                         score += 1
-                        reasons.append("creating_suspicious_children")
+                        reasons.append("spawns_scripts")
                         break
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 pass
         
-        # File activity
         activity_count = file_activity_by_pid_snapshot.get(p["pid"], 0)
         if activity_count > 50:
             score += 1
             reasons.append("high_file_activity")
+        elif activity_count > 20:
+            score += 0.5
+            reasons.append("file_activity")
+        
         if file_activity_global_snapshot > 500:
             score += 1
-            reasons.append("high_global_file_activity")
+            reasons.append("global_file_activity")
 
         # Determine severity
         if detection_info.get("hash_match"):
@@ -1057,7 +940,7 @@ def scan_processes(force_refresh=False):
             severity = "critical"
         elif detection_confidence >= 40 or score >= 3.5:
             severity = "warning"
-        elif detection_confidence >= 20:
+        elif detection_confidence >= 20 or score >= 2:
             severity = "suspicious"
         else:
             severity = "info"
@@ -1071,7 +954,7 @@ def scan_processes(force_refresh=False):
             "reasons": reasons,
             "severity": severity,
             "time": time.strftime("%H:%M:%S"),
-            "status": "detected" if severity in ["confirmed_malware", "critical", "warning"] else "safe",
+            "status": "detected" if severity in ["confirmed_malware", "critical", "warning", "suspicious"] else "safe",
             "malware_info": detection_details if detection_details else None,
             "file_hash": file_hashes.get("sha256") if file_hashes else None,
             "hashes": file_hashes,
@@ -1083,12 +966,12 @@ def scan_processes(force_refresh=False):
             continue
         seen_pids.add(p["pid"])
 
-        if severity in ["confirmed_malware", "critical", "warning"]:
+        if severity in ["confirmed_malware", "critical", "warning", "suspicious"]:
             alerts.append(entry)
         else:
             safe.append(entry)
         
-        if (idx + 1) % 100 == 0:
+        if (idx + 1) % 50 == 0:
             print(f"   Analyzed {idx + 1}/{len(processes)} processes...")
 
     result = {
@@ -1104,8 +987,9 @@ def scan_processes(force_refresh=False):
     confirmed = len([a for a in alerts if a['severity'] == 'confirmed_malware'])
     critical = len([a for a in alerts if a['severity'] == 'critical'])
     warning = len([a for a in alerts if a['severity'] == 'warning'])
+    suspicious = len([a for a in alerts if a['severity'] == 'suspicious'])
     
-    print(f"✓ Enhanced AI scan complete: {confirmed} confirmed, {critical} critical, {warning} warning threats detected")
+    print(f"✓ Enhanced AI scan complete: {confirmed} confirmed, {critical} critical, {warning} warning, {suspicious} suspicious")
     
     return result
 
@@ -1137,6 +1021,7 @@ def stream_processes():
         "data": {"total_count": count},
         "status": "complete"
     }
+
 
 def store_scan_results(scan_data):
     """Store scan results to database"""
@@ -1184,16 +1069,11 @@ def store_scan_results(scan_data):
                 if alert['severity'] == 'confirmed_malware':
                     if alert.get('matched_family'):
                         title = f"🚨 CONFIRMED MALWARE: {alert['matched_family']} family"
-                    elif alert.get('malware_info'):
-                        title = f"🚨 CONFIRMED MALWARE: {', '.join(alert['malware_info'][:2])}"
                     else:
                         title = f"🚨 CONFIRMED MALWARE: {alert['name']}"
                 else:
                     confidence = alert.get('detection_confidence', 0)
-                    if confidence > 0:
-                        title = f"Suspicious Process: {alert['name']} (confidence: {confidence}%)"
-                    else:
-                        title = f"Suspicious Process: {alert['name']}"
+                    title = f"{alert['severity'].upper()}: {alert['name']} (confidence: {confidence}%)"
                 
                 db.log_alert(
                     scan_id=scan_id,
@@ -1251,87 +1131,60 @@ def store_scan_results(scan_data):
             pass
         raise e
 
-def train_ml_model(training_data_path="training_samples"):
-    """
-    Train ML model from collected samples
-    This should be run separately to build the model
-    """
-    if not os.path.exists(training_data_path):
-        print(f"Training data path {training_data_path} not found")
-        return
-    
-    print("Training ML model...")
-    features = []
-    labels = []
-    
-    # Collect malware samples
-    malware_path = os.path.join(training_data_path, "malware")
-    if os.path.exists(malware_path):
-        for filename in os.listdir(malware_path):
-            filepath = os.path.join(malware_path, filename)
-            if os.path.isfile(filepath):
-                feat = ml_detector.extract_features(filepath)
-                features.append(feat[0])
-                labels.append(1)
-    
-    # Collect benign samples
-    benign_path = os.path.join(training_data_path, "benign")
-    if os.path.exists(benign_path):
-        for filename in os.listdir(benign_path):
-            filepath = os.path.join(benign_path, filename)
-            if os.path.isfile(filepath):
-                feat = ml_detector.extract_features(filepath)
-                features.append(feat[0])
-                labels.append(0)
-    
-    if len(features) > 10:
-        # Train random forest model
-        model = RandomForestClassifier(n_estimators=100, random_state=42)
-        model.fit(features, labels)
-        
-        # Save model
-        with open('malware_model.pkl', 'wb') as f:
-            pickle.dump(model, f)
-        
-        print(f"✓ Model trained on {len(features)} samples and saved to malware_model.pkl")
-        return model
-    else:
-        print(f"Not enough training samples. Found {len(features)} samples.")
-        return None
-
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description='Enhanced Malware Scanner')
-    parser.add_argument('--train', action='store_true', help='Train ML model from samples')
+    parser = argparse.ArgumentParser(description='Enhanced Malware Scanner with AI Detection')
     parser.add_argument('--scan', action='store_true', help='Run scan')
     
     args = parser.parse_args()
     
-    if args.train:
-        train_ml_model()
-    else:
-        observer = start_file_monitoring()
-        print("File monitoring started. Running enhanced AI scan...")
-        result = scan_processes()
-        print(f"\nTotal processes: {result['total_processes']}")
-        print(f"Alerts: {len(result['alerts'])}")
-        print(f"Safe: {len(result['safe'])}")
-        
-        if result['alerts']:
-            print("\nAlerts:")
-            for alert in result['alerts']:
-                confidence = alert.get('detection_confidence', 0)
-                family = alert.get('matched_family', '')
-                if family:
-                    print(f"  - {alert['name']} (PID {alert['pid']}): {alert['severity']} - {family} family (confidence: {confidence}%)")
-                else:
-                    print(f"  - {alert['name']} (PID {alert['pid']}): {alert['severity']} - reasons={alert['reasons']}")
-        
-        print("\nMonitoring files... Press Ctrl+C to stop")
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            observer.stop()
-            observer.join()
+    # Check if ML model is trained
+    if not ml_model.is_trained:
+        print("\n⚠ WARNING: ML model not trained!")
+        print("   Run 'python ml_model.py' first to train the model using MalwareData.csv")
+        print("   The scanner will still work using other detection methods.\n")
+    
+    observer = start_file_monitoring()
+    print("=" * 60)
+    print("🔍 ENHANCED MALWARE SCANNER WITH AI DETECTION")
+    print("=" * 60)
+    print(f"📊 Loaded {len(malware_hashes['sha256'])} SHA256 signatures")
+    print(f"📊 Loaded {len(malware_hashes.get('imphash', {}))} IMPHASH signatures")
+    print(f"📊 Loaded {len(malware_hashes.get('tlsh', {}))} TLSH fuzzy signatures")
+    print(f"🤖 ML Model: {'READY' if ml_model.is_trained else 'NOT TRAINED'}")
+    print("=" * 60)
+    
+    print("File monitoring started. Running enhanced AI scan...")
+    result = scan_processes()
+    print(f"\n📊 Scan Summary:")
+    print(f"   Total processes: {result['total_processes']}")
+    print(f"   Total alerts: {len(result['alerts'])}")
+    print(f"   Safe processes: {len(result['safe'])}")
+    
+    if result['alerts']:
+        print("\n🚨 ALERTS:")
+        for alert in result['alerts']:
+            confidence = alert.get('detection_confidence', 0)
+            family = alert.get('matched_family', '')
+            
+            if family:
+                print(f"  [{alert['severity'].upper()}] {alert['name']} (PID {alert['pid']})")
+                print(f"       Family: {family}")
+                print(f"       Confidence: {confidence}%")
+            else:
+                print(f"  [{alert['severity'].upper()}] {alert['name']} (PID {alert['pid']})")
+            
+            if alert.get('malware_info'):
+                for detail in alert['malware_info'][:3]:
+                    print(f"       → {detail}")
+            print()
+    
+    print("\n👁️  Monitoring files... Press Ctrl+C to stop")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+        observer.join()
+        print("\n👋 Scanner stopped.")
