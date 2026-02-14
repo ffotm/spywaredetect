@@ -28,7 +28,7 @@ Malware Detector is a Windows desktop application designed to analyze executable
 ### For End Users (Pre-built Application)
 
 - Windows 10/11 (64-bit)
-- Minimum 500MB free disk space
+- Minimum 2GB free disk space
 - No additional software required
 
 ### For Developers
@@ -36,6 +36,19 @@ Malware Detector is a Windows desktop application designed to analyze executable
 - Node.js 18+
 - Python 3.11+
 - Git
+- fastapi 0.115.6
+- uvicorn 0.34.0
+- psutil 6.1.1
+- watchdog 6.0.0
+- pefile 2024.8.26
+- scikit-learn 1.6.1
+- pandas 2.2.3
+- numpy 2.2.3
+- python-multipart 0.0.6
+- joblib 1.3.2
+- dotenv 0.9.9
+- python-dotenv 1.2.1 
+- supabase 2.28.0
 
 ---
 
@@ -52,8 +65,8 @@ Malware Detector is a Windows desktop application designed to analyze executable
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/malware-detector.git
-cd malware-detector
+git clone https://github.com/ffotm/malwaredetector.git
+cd malwaredetector
 
 # Install dependencies
 npm install
@@ -139,7 +152,7 @@ Alternatively, configure directly in `electron/main.js`.
 
 ### 1. Signature-Based Detection
 
-- Computes SHA256 hash of the file
+- Computes SHA256, md5, SH1 hash of the file
 - Compares against internal malware signature database
 
 ### 2. Machine Learning Analysis
@@ -200,7 +213,7 @@ API available at: http://localhost:8000
 
 Check logs:
 
-C:\Users\YourUsername\AppData\Roaming\malware-detector\
+C:\Users\j\AppData\Roaming\malware-detector\
 
 Log files:
 - app.log
